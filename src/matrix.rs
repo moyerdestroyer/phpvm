@@ -16,7 +16,7 @@ pub fn run_with_format(command: &[String], format: OutputFormat) -> Result<()> {
         anyhow::bail!("matrix requires a command to run (e.g. `phpvm matrix composer test`)");
     }
 
-    let project_dir = std::env::current_dir()?;
+    let project_dir = config::current_project_dir()?;
     let config = config::load_config(&project_dir)?;
 
     // Build the matrix of PHP versions to test

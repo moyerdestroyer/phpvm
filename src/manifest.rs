@@ -147,7 +147,10 @@ pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
                         Ok(m) => return Ok(m),
                         Err(e) => {
                             // Cache file corrupt?  Warn and re-fetch.
-                            eprintln!("Warning: cached manifest is invalid ({}) — re-fetching", e);
+                            crate::output::warn(&format!(
+                                "cached manifest is invalid ({}) — re-fetching",
+                                e
+                            ));
                         }
                     }
                 }
@@ -173,10 +176,22 @@ pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
 
 /// Fetch the manifest from the default URL, using the default cache directory.
 ///
-/// This is the main entry-point for most callers.
+/// This is the main entry-point for most callers. Prefer `fetch_from_config` when
+/// a loaded Config (which may override `manifest_url`) is available.
 pub fn fetch_default() -> Result<Manifest> {
     let cache_dir = config::cache_dir()?;
     fetch_cached(DEFAULT_MANIFEST_URL, &cache_dir)
+}
+
+/// Fetch the manifest, using `config.manifest_url` if set, otherwise the default URL.
+/// Uses the standard cache directory.
+pub fn fetch_from_config(config: &config::Config) -> Result<Manifest> {
+    let url = config
+        .manifest_url
+        .as_deref()
+        .unwrap_or(DEFAULT_MANIFEST_URL);
+    let cache_dir = config::cache_dir()?;
+    fetch_cached(url, &cache_dir)
 }
 
 /// Parse a JSON string into a `Manifest`.

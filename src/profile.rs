@@ -104,10 +104,18 @@ pub fn resolve_or_minimal(name: &str, custom_profiles: &[Profile]) -> Profile {
 
 /// List all available profiles (built-in + custom from config) to stdout.
 pub fn list_profiles(format: OutputFormat) -> anyhow::Result<()> {
-    let project_dir = std::env::current_dir()?;
+    let project_dir = crate::config::current_project_dir()?;
     let config = crate::config::load_config(&project_dir)?;
 
-    let all_profiles: Vec<Profile> = builtins().into_iter().chain(config.profiles).collect();
+    // Dedup by name, preferring built-ins (which take priority per AGENTS.md and resolve()).
+    let mut seen = Vec::new();
+    let mut all_profiles: Vec<Profile> = Vec::new();
+    for p in builtins().into_iter().chain(config.profiles.into_iter()) {
+        if !seen.contains(&p.name) {
+            seen.push(p.name.clone());
+            all_profiles.push(p);
+        }
+    }
 
     match format {
         OutputFormat::Human => {
@@ -115,9 +123,9 @@ pub fn list_profiles(format: OutputFormat) -> anyhow::Result<()> {
             crate::output::info("==================");
             for p in &all_profiles {
                 if p.extensions.is_empty() {
-                    println!("  {} (no extensions)", p.name);
+                    crate::output::list_item(&format!("{} (no extensions)", p.name));
                 } else {
-                    println!("  {} [{}]", p.name, p.extensions.join(", "));
+                    crate::output::list_item(&format!("{} [{}]", p.name, p.extensions.join(", ")));
                 }
             }
         }

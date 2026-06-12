@@ -66,11 +66,12 @@ pub enum Command {
 /// Parse a report format string into an OutputFormat.
 impl Command {
     /// Get the output format for commands that support it.
-    #[allow(dead_code)]
     pub fn output_format(&self) -> crate::output::OutputFormat {
         match self {
             Command::Matrix { report, .. } => parse_report_format(report),
-            Command::Doctor { json } | Command::ReleaseCheck { json } => {
+            Command::Doctor { json }
+            | Command::ReleaseCheck { json }
+            | Command::Profiles { json } => {
                 if *json {
                     crate::output::OutputFormat::Json
                 } else {

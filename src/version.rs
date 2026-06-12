@@ -164,7 +164,9 @@ pub fn resolve(specifier: &VersionSpecifier, available: &[String]) -> Result<Str
             let selected = candidates
                 .into_iter()
                 .max_by_key(|v| v.patch)
-                .expect("candidates is non-empty");
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No candidates after filter (should be impossible)")
+                })?;
             Ok(selected.to_version_string())
         }
         VersionSpecifier::MinMinor { major, minor } => {
@@ -175,7 +177,9 @@ pub fn resolve(specifier: &VersionSpecifier, available: &[String]) -> Result<Str
             let selected = candidates
                 .into_iter()
                 .min_by_key(|v| v.patch)
-                .expect("candidates is non-empty");
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No candidates after filter (should be impossible)")
+                })?;
             Ok(selected.to_version_string())
         }
     }
@@ -220,7 +224,7 @@ pub fn list_installed() -> Result<()> {
         versions.sort();
         output::info("Installed runtimes:");
         for v in &versions {
-            println!("  {}", v);
+            output::list_item(&v.to_string());
         }
     }
 

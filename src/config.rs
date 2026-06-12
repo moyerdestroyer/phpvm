@@ -1,6 +1,6 @@
-use anyhow::Result;
-use camino::Utf8PathBuf;
-use directories::ProjectDirs;
+use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::profile::Profile;
@@ -26,12 +26,33 @@ pub struct Config {
     pub profiles: Vec<Profile>,
 }
 
-/// Returns the PHPVM data directory (e.g. ~/.phpvm/)
+/// Returns the PHPVM data directory.
+///
+/// Defaults to `~/.phpvm/` (or the platform equivalent of the user's home
+/// directory + `/.phpvm`), which matches documented examples and provides
+/// reproducibility. Users can override with the `PHPVM_HOME` environment
+/// variable (e.g. for containers or custom locations).
 pub fn data_dir() -> Result<Utf8PathBuf> {
-    let dirs = ProjectDirs::from("com", "phpvm", "phpvm")
-        .ok_or_else(|| anyhow::anyhow!("Could not determine PHPVM data directory"))?;
-    let path = Utf8PathBuf::from(dirs.data_dir().to_string_lossy().as_ref());
-    Ok(path)
+    if let Ok(custom) = std::env::var("PHPVM_HOME") {
+        return Ok(Utf8PathBuf::from(custom));
+    }
+
+    let home = BaseDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        .home_dir()
+        .to_path_buf();
+    let home_utf8 = Utf8PathBuf::from_path_buf(home)
+        .map_err(|p| anyhow::anyhow!("home directory is not valid UTF-8: {:?}", p))?;
+    Ok(home_utf8.join(".phpvm"))
+}
+
+/// Returns the current project directory (CWD) as a `Utf8PathBuf`.
+/// This is the single helper for current_dir + camino conversion + consistent
+/// error context (addresses repeated boilerplate and enforces Utf8 paths).
+pub fn current_project_dir() -> Result<Utf8PathBuf> {
+    let p = std::env::current_dir().context("Failed to get current directory")?;
+    Utf8PathBuf::from_path_buf(p)
+        .map_err(|p| anyhow::anyhow!("Current directory is not valid UTF-8: {:?}", p))
 }
 
 /// Returns the runtimes directory (e.g. ~/.phpvm/runtimes/)
@@ -62,18 +83,19 @@ pub fn resolve_matrix(config: &Config) -> Vec<String> {
     config.matrix.clone().unwrap_or_else(default_matrix)
 }
 
-/// Load config from a project-local .phpvm.toml, falling back to defaults.
-pub fn load_config(project_dir: &std::path::Path) -> Result<Config> {
+/// Load config from a project-local .phpvm.toml (or global), falling back to defaults.
+/// `project_dir` should be a valid UTF-8 path (use `current_project_dir()`).
+pub fn load_config(project_dir: &Utf8Path) -> Result<Config> {
     let local_config = project_dir.join(".phpvm.toml");
-    if local_config.exists() {
-        let contents = std::fs::read_to_string(&local_config)?;
+    if local_config.as_std_path().exists() {
+        let contents = std::fs::read_to_string(local_config.as_std_path())?;
         let config: Config = toml::from_str(&contents)?;
         return Ok(config);
     }
 
     let global_config = data_dir()?.join("config.toml");
-    if global_config.exists() {
-        let contents = std::fs::read_to_string(&global_config)?;
+    if global_config.as_std_path().exists() {
+        let contents = std::fs::read_to_string(global_config.as_std_path())?;
         let config: Config = toml::from_str(&contents)?;
         return Ok(config);
     }
@@ -171,6 +193,11 @@ matrix = ["8.0.latest", "8.1.latest"]
         assert!(result.is_err());
     }
 
+    fn utf8_project_dir(dir: &TempDir) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(dir.path().to_path_buf())
+            .expect("temporary directory paths are valid UTF-8 in tests")
+    }
+
     #[test]
     fn load_config_with_project_local() {
         let dir = TempDir::new().unwrap();
@@ -182,7 +209,7 @@ php_constraint = ">=8.1"
 profile = "wordpress"
 "#,
         );
-        let config = load_config(dir.path()).unwrap();
+        let config = load_config(&utf8_project_dir(&dir)).unwrap();
         assert_eq!(config.php_constraint.as_deref(), Some(">=8.1"));
         assert_eq!(config.profile.as_deref(), Some("wordpress"));
     }
@@ -190,7 +217,7 @@ profile = "wordpress"
     #[test]
     fn load_config_with_no_files_returns_default() {
         let dir = TempDir::new().unwrap();
-        let config = load_config(dir.path()).unwrap();
+        let config = load_config(&utf8_project_dir(&dir)).unwrap();
         assert!(config.php_constraint.is_none());
         assert!(config.profile.is_none());
         assert!(config.matrix.is_none());
@@ -201,7 +228,7 @@ profile = "wordpress"
     fn load_config_with_invalid_local_returns_error() {
         let dir = TempDir::new().unwrap();
         write_file(&dir, ".phpvm.toml", "php_constraint = [bogus");
-        let result = load_config(dir.path());
+        let result = load_config(&utf8_project_dir(&dir));
         assert!(result.is_err());
     }
 

@@ -13,8 +13,8 @@ use crate::providers;
 pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
     output::info(&format!("Installing PHP runtime: {}", version));
 
-    // Resolve the profile.
-    let project_dir = std::env::current_dir()?;
+    // Resolve the profile (and potentially manifest override).
+    let project_dir = config::current_project_dir()?;
     let config = config::load_config(&project_dir)?;
     let resolved_profile = profile::resolve_or_minimal(
         profile_name.unwrap_or_else(|| config.profile.as_deref().unwrap_or("minimal")),
@@ -29,7 +29,8 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
     }
 
     // Fetch the manifest to know which versions are available.
-    let mf = manifest::fetch_default()?;
+    // Respects config.manifest_url if set in .phpvm.toml or global config.
+    let mf = manifest::fetch_from_config(&config)?;
     let available = mf.available_versions();
 
     // Resolve the user's specifier against the available versions.

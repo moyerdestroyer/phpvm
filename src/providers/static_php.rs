@@ -92,14 +92,14 @@ fn download_archive(url: &str) -> Result<Utf8PathBuf> {
                     "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
                      {bytes}/{total_bytes} ({eta})",
                 )
-                .unwrap()
+                .expect("hardcoded progress bar template is valid")
                 .progress_chars("#>-"),
         );
     } else {
         progress.set_style(
             indicatif::ProgressStyle::default_spinner()
                 .template("{spinner:.green} [{elapsed_precise}] {bytes} downloaded")
-                .unwrap(),
+                .expect("hardcoded progress spinner template is valid"),
         );
     }
 
@@ -289,12 +289,16 @@ fn extract_zip(archive_path: &Utf8PathBuf, target: &Utf8PathBuf) -> Result<()> {
             .with_context(|| format!("Failed to extract {}", dest_path))?;
 
         // Restore Unix permissions if available (zip entries may carry them).
+        // Best-effort only: ignore failures (e.g. unusual filesystems, Windows
+        // extraction of a unix-targeted archive). On Windows, executability for
+        // prebuilt PHP/Composer is determined by .exe extension + PATHEXT rather
+        // than mode bits; the manifest-supplied archives for the host are expected
+        // to be correct.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = entry.unix_mode() {
-                fs::set_permissions(&dest_path, fs::Permissions::from_mode(mode))
-                    .with_context(|| format!("Failed to set permissions on {}", dest_path))?;
+                let _ = fs::set_permissions(&dest_path, fs::Permissions::from_mode(mode));
             }
         }
     }

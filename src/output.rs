@@ -48,6 +48,17 @@ pub fn error(message: &str) {
     print(Level::Error, message);
 }
 
+/// Print an indented list item (for human-readable lists of versions/profiles/etc).
+/// Centralizes the bare println for indented items.
+pub fn list_item(message: &str) {
+    println!("  {}", message);
+}
+
+/// Print a blank line. Centralizes formatting whitespace in human output.
+pub fn blank() {
+    println!();
+}
+
 // ---------------------------------------------------------------------------
 // Structured result types (for JSON output support)
 // ---------------------------------------------------------------------------
@@ -148,7 +159,7 @@ pub fn print_matrix_result(result: &MatrixResult, format: OutputFormat) {
                     RunStatus::Fail => error(&format!("{} {}", entry.php_version, entry.status)),
                 }
             }
-            println!();
+            blank();
             match result.overall {
                 RunStatus::Pass => success("Overall: PASS"),
                 RunStatus::Fail => error("Overall: FAIL"),
@@ -188,7 +199,7 @@ pub fn print_doctor_result(result: &DoctorResult, format: OutputFormat) {
             if !result.recommended_matrix.is_empty() {
                 info("Recommended Matrix:");
                 for v in &result.recommended_matrix {
-                    println!("  {}", v);
+                    list_item(v);
                 }
             }
         }
@@ -218,7 +229,7 @@ pub fn print_release_check_result(result: &ReleaseCheckResult, format: OutputFor
                 None => info("PHP Constraint: not specified"),
             }
 
-            println!();
+            blank();
             info("Testing:");
             for entry in &result.entries {
                 match entry.status {
@@ -227,7 +238,7 @@ pub fn print_release_check_result(result: &ReleaseCheckResult, format: OutputFor
                 }
             }
 
-            println!();
+            blank();
             match result.overall {
                 RunStatus::Pass => success("Result: RELEASE READY"),
                 RunStatus::Fail => error("Result: RELEASE BLOCKED"),

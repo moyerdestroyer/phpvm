@@ -64,7 +64,9 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
     let bin_dir = runtime_path.join("bin");
     let new_path = build_path(&bin_dir)?;
 
-    let (program, args) = command.split_first().expect("command is non-empty");
+    let (program, args) = command
+        .split_first()
+        .context("run requires a non-empty command")?;
 
     let status = Command::new(program)
         .args(args)
