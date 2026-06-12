@@ -1,0 +1,4 @@
+#!/usr/bin/env php
+<?php
+// Laravel artisan fixture for testing project detection.
+echo "Laravel Framework test fixture\n";

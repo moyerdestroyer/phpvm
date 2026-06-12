@@ -1,0 +1,11 @@
+# Clippy configuration for phpvm
+# Treat warnings as errors in CI via: cargo clippy -- -D warnings
+
+# Cognitive complexity limits
+cognitive-complexity-threshold = 30
+
+# Disallow common mistakes
+disallowed-names = ["foo", "bar", "baz", "qux"]
+
+# Type complexity
+type-complexity-threshold = 250
