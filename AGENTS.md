@@ -33,6 +33,7 @@ PHPVM is a single-crate CLI. Modules live in `src/` and are organized by domain:
 | `manifest` | Remote manifest fetching and parsing |
 | `matrix` | Multi-runtime command execution |
 | `output` | Terminal output formatting and styling |
+| `profile` | Extension profiles (built-in and custom) |
 | `runner` | Single-runtime command execution |
 | `version` | PHP version resolution and listing |
 | `providers/` | Runtime installation backends (static_php, docker, local) |
@@ -61,6 +62,26 @@ When making design decisions, optimize for these workflows first.
 ### Providers
 
 Providers implement a common interface. The rest of the application should not know whether a runtime came from `static_php`, `docker`, or `local`. Provider-specific behavior stays inside the provider implementation.
+
+### Profiles
+
+PHPVM ships with three built-in extension profiles:
+
+- **wordpress** — curl, dom, gd, intl, mbstring, mysqli, openssl, pdo_mysql, xml, zip
+- **laravel** — curl, intl, mbstring, openssl, pdo_mysql, tokenizer, xml, zip
+- **minimal** — no extensions (base PHP)
+
+Users can define custom profiles in `.phpvm.toml`:
+
+```toml
+profile = "drupal"
+
+[[profiles]]
+name = "drupal"
+extensions = ["curl", "dom", "gd", "mbstring", "mysql", "pdo_mysql", "xml", "zip"]
+```
+
+Built-in profiles take priority over custom profiles with the same name. The `phpvm profiles` command lists all available profiles. The `phpvm install --profile=drupal 8.3` flag selects a profile at install time.
 
 ### Manifest Contract
 
@@ -198,6 +219,7 @@ src/
 ├── manifest.rs      # Remote manifest handling
 ├── matrix.rs        # Multi-runtime execution
 ├── output.rs        # Terminal output formatting
+├── profile.rs       # Extension profiles (built-in and custom)
 ├── runner.rs        # Single-runtime command execution
 ├── version.rs       # Version resolution and listing
 └── providers/
