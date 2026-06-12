@@ -3,7 +3,10 @@ use std::fmt;
 use anyhow::{bail, Result};
 
 use crate::config;
+use crate::manifest;
 use crate::output;
+use crate::profile;
+use crate::runner;
 
 // ---------------------------------------------------------------------------
 // VersionSpecifier — how the user describes which version they want
@@ -16,6 +19,7 @@ use crate::output;
 ///   - `8.3`           → LatestMinor { major: 8, minor: 3 }
 ///   - `8.3.latest`    → LatestMinor { major: 8, minor: 3 }
 ///   - `8.3.min`       → MinMinor { major: 8, minor: 3 }
+///   - `latest`        → Latest (highest version in the available list)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionSpecifier {
     /// A fully-qualified version: MAJOR.MINOR.PATCH
@@ -24,6 +28,8 @@ pub enum VersionSpecifier {
     LatestMinor { major: u32, minor: u32 },
     /// The earliest (minimum) patch for a given major.minor series.
     MinMinor { major: u32, minor: u32 },
+    /// The single highest version present in the list of available/installed versions.
+    Latest,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +95,11 @@ impl PhpVersion {
 /// Returns an error if the input is malformed or contains non-numeric version
 /// components.
 pub fn parse(specifier: &str) -> Result<VersionSpecifier> {
+    // Bare "latest" (case-insensitive) means the single highest in the list.
+    if specifier.eq_ignore_ascii_case("latest") {
+        return Ok(VersionSpecifier::Latest);
+    }
+
     // Handle .latest suffix
     if let Some(stripped) = specifier.strip_suffix(".latest") {
         let (major, minor) = parse_major_minor(stripped, specifier)?;
@@ -123,7 +134,7 @@ pub fn parse(specifier: &str) -> Result<VersionSpecifier> {
         }
         _ => bail!(
             "Invalid version specifier '{}'. Expected 'MAJOR.MINOR', \
-             'MAJOR.MINOR.PATCH', 'MAJOR.MINOR.latest', or 'MAJOR.MINOR.min'",
+             'MAJOR.MINOR.PATCH', 'MAJOR.MINOR.latest', 'MAJOR.MINOR.min', or 'latest'",
             specifier
         ),
     }
@@ -182,6 +193,20 @@ pub fn resolve(specifier: &VersionSpecifier, available: &[String]) -> Result<Str
                 })?;
             Ok(selected.to_version_string())
         }
+        VersionSpecifier::Latest => {
+            if available.is_empty() {
+                bail!("No versions available");
+            }
+            let candidates: Vec<PhpVersion> = available
+                .iter()
+                .filter_map(|v| PhpVersion::parse(v).ok())
+                .collect();
+            let selected = candidates
+                .into_iter()
+                .max()
+                .ok_or_else(|| anyhow::anyhow!("No parseable candidates"))?;
+            Ok(selected.to_version_string())
+        }
     }
 }
 
@@ -201,31 +226,319 @@ pub fn resolve_specifier(specifier: &str, available: &[String]) -> Result<String
 // ---------------------------------------------------------------------------
 
 /// List all installed PHP runtimes.
+///
+/// The currently "active" runtime (resolved from project config's php_constraint,
+/// or the highest installed version if no constraint) is marked with a leading `*`.
 pub fn list_installed() -> Result<()> {
-    let runtimes_dir = config::runtimes_dir()?;
-
-    if !runtimes_dir.exists() {
-        output::info("No runtimes installed.");
-        return Ok(());
-    }
-
-    // Collect directory entries; parse as PhpVersion for correct numeric
-    // ordering (so "8.3.10" sorts after "8.3.9", not before).
-    let mut versions: Vec<PhpVersion> = std::fs::read_dir(&runtimes_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter_map(|name| PhpVersion::parse(&name).ok())
+    let raw = runner::installed_versions()?;
+    let mut versions: Vec<PhpVersion> = raw
+        .iter()
+        .filter_map(|name| PhpVersion::parse(name).ok())
         .collect();
 
     if versions.is_empty() {
         output::info("No runtimes installed.");
-    } else {
-        versions.sort();
-        output::info("Installed runtimes:");
-        for v in &versions {
-            output::list_item(&v.to_string());
+        return Ok(());
+    }
+
+    versions.sort();
+    let installed_strs: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
+    let current = compute_current_version(&installed_strs);
+
+    for v in &versions {
+        let s = v.to_string();
+        if current.as_deref() == Some(s.as_str()) {
+            println!("* {}", s);
+        } else {
+            output::list_item(&s);
         }
+    }
+
+    Ok(())
+}
+
+/// Build the shell export snippet for activating a specific resolved runtime.
+/// Used by both `activate` (for `use`) and the `env` command.
+///
+/// Note: composer globals (COMPOSER_HOME) are shared across all patch versions
+/// of the same minor series (all 8.3.x share one `composer-homes/8.3` bucket).
+fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> String {
+    let bin_dir = runtime_path.join("bin");
+    let composer_home = composer_home_for(resolved).expect("valid resolved version");
+    let global_bin = composer_home.join("vendor").join("bin");
+
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let path_value = format!(
+        "{}{}{}{}{}",
+        bin_dir, separator, global_bin, separator, "$PATH"
+    );
+
+    format!(
+        r#"export PHPVM_VERSION="{}"
+export COMPOSER_HOME="{}"
+export PATH="{}"
+"#,
+        resolved, composer_home, path_value
+    )
+}
+
+/// Activate a runtime for the current shell by printing an eval-able snippet.
+///
+/// Intended usage:
+///   eval "$(phpvm use 8.3)"
+///
+/// This sets:
+/// - PHPVM_VERSION (so `phpvm ls` can mark it with *)
+/// - COMPOSER_HOME (isolates `composer global` packages per runtime)
+/// - PATH (so bare `php`, `composer`, and global tools from that runtime work)
+///
+/// The per-runtime globals live under `~/.phpvm/runtimes/<resolved>/composer-home/`.
+pub fn activate(spec: &str) -> Result<()> {
+    let resolved = match runner::resolve_version(spec) {
+        Ok(r) => r,
+        Err(_) => {
+            // Give a clear, actionable message for the common case.
+            anyhow::bail!(
+                "PHP runtime matching '{}' is not installed. \
+                 Run `phpvm install {}` first (or `phpvm ls` to see installed runtimes).",
+                spec,
+                spec
+            );
+        }
+    };
+
+    // Verify it is actually on disk.
+    let runtimes_dir = config::runtimes_dir()?;
+    let runtime_path = runtimes_dir.join(&resolved);
+    if !runtime_path.exists() {
+        anyhow::bail!(
+            "PHP runtime {} is not installed. Run `phpvm install {}` first.",
+            resolved,
+            spec
+        );
+    }
+
+    // Persist so that `phpvm use` affects future terminals/sessions.
+    // "use" is the single command that determines the active version (no
+    // separate "default" setter is needed).
+    config::set_current_version(&resolved)?;
+
+    // TODO (per-project "use"): Support a project-local declaration so that
+    // `phpvm use` (no argument) and/or shell integration can pick the right
+    // runtime + profile automatically inside a project.
+    //
+    // Options to consider:
+    //   - A lightweight `.phpvm-version` file containing just a specifier
+    //     (e.g. "8.3", "latest", "8.4.11") — analogous to .nvmrc / .node-version.
+    //   - Or (better for richness) reading from the existing project
+    //     `.phpvm.toml`, which can already express `php_constraint` + `profile`
+    //     (built-in or custom) + other settings.
+    //
+    // Important: any per-project mechanism must be able to specify the
+    // extension profile, not just the PHP version, because the user noted
+    // that "it would also require extension settings, not just php version."
+    //
+    // This would primarily affect `print_env` / activation and the no-arg
+    // case of `activate`. Global `phpvm use <ver>` should probably still
+    // override for the current user/session.
+
+    // Ensure the minor-series composer home exists for globals isolation.
+    // All 8.3.x patches share `~/.phpvm/composer-homes/8.3/`.
+    if let Ok(composer_home) = composer_home_for(&resolved) {
+        let _ = std::fs::create_dir_all(&composer_home);
+    }
+
+    // Emit the activation snippet (for immediate effect in *this* shell via eval).
+    // Informational message on stderr; pure exports on stdout.
+    eprintln!(
+        "Using PHP {} from {}\n\
+         (This is now active here. For new terminals/sessions, put \
+         `eval \"$(phpvm env)\"` in your shell rc once.)",
+        resolved, runtime_path
+    );
+    let snippet = build_activation_snippet(&resolved, &runtime_path);
+    print!("{}", snippet);
+
+    Ok(())
+}
+
+/// Returns the directory that should be used as COMPOSER_HOME for global
+/// packages for a given resolved version.
+///
+/// Globals are shared across patch versions in the same minor series
+/// (i.e. all 8.3.x runtimes share the same composer home).
+/// This lives under `~/.phpvm/composer-homes/8.3/`.
+pub fn composer_home_for(resolved: &str) -> Result<camino::Utf8PathBuf> {
+    let v = PhpVersion::parse(resolved)?;
+    let homes_dir = crate::config::data_dir()?.join("composer-homes");
+    Ok(homes_dir.join(format!("{}.{}", v.major, v.minor)))
+}
+
+/// Show the currently active PHP version.
+///
+/// Priority: live $PHPVM_VERSION env (current shell) > persisted from
+/// `phpvm use` > "none".
+pub fn show_current() -> Result<()> {
+    if let Ok(v) = std::env::var("PHPVM_VERSION") {
+        if !v.is_empty() {
+            println!("{}", v);
+            return Ok(());
+        }
+    }
+
+    if let Some(v) = config::get_current_version() {
+        // Only report it if the runtime is still present on disk.
+        if let Ok(installed) = runner::installed_versions() {
+            if installed.iter().any(|i| i == &v) {
+                println!("{}", v);
+                return Ok(());
+            }
+        }
+    }
+
+    println!("none");
+    Ok(())
+}
+
+/// Print shell integration for `phpvm env`.
+///
+/// Output is designed to be eval'ed, typically once from your shell rc:
+///   eval "$(phpvm env)"
+///
+/// This sets up (modeled after fnm):
+/// - A `phpvm` shell function wrapper. After this, plain `phpvm use <ver>`
+///   will immediately update PATH / COMPOSER_HOME / PHPVM_VERSION in the
+///   *current* shell (no extra manual eval needed for each `use`).
+/// - Activation of the persisted current version (or one passed with --version)
+///   so new shells start with the last `phpvm use`d version.
+///
+/// See the "Daily development" section in the README for the recommended
+/// one-time setup.
+pub fn print_env(version: Option<&str>) -> Result<()> {
+    // Shell function wrapper. This is the key to removing the per-`use` eval step.
+    // Once installed via the rc, `phpvm use 8.2` (the function) will run the
+    // binary (for persistence) and then eval its export output in the current shell.
+    let wrapper = r#"phpvm() {
+  if [ "$1" = "use" ]; then
+    eval "$(command phpvm "$@")"
+  else
+    command phpvm "$@"
+  fi
+}
+"#;
+    print!("{}", wrapper);
+
+    // Determine what (if anything) to activate in *this* shell right now.
+    let target_spec: Option<String> = match version {
+        Some(v) => Some(v.to_string()),
+        None => config::get_current_version(),
+    };
+
+    if let Some(spec) = target_spec {
+        match runner::resolve_version(&spec) {
+            Ok(resolved) => {
+                let runtimes_dir = config::runtimes_dir()?;
+                let runtime_path = runtimes_dir.join(&resolved);
+
+                if runtime_path.exists() {
+                    if let Ok(composer_home) = composer_home_for(&resolved) {
+                        let _ = std::fs::create_dir_all(&composer_home);
+                    }
+
+                    let snippet = build_activation_snippet(&resolved, &runtime_path);
+                    print!("{}", snippet);
+                } else {
+                    eprintln!(
+                        "phpvm env: runtime {} not found on disk (wrapper installed anyway)",
+                        resolved
+                    );
+                }
+            }
+            Err(_) => {
+                eprintln!(
+                    "phpvm env: could not resolve '{}' (wrapper installed anyway). Run `phpvm use` to pick a version.",
+                    spec
+                );
+            }
+        }
+    }
+    // No target spec at all (first time ever) → we still emitted the wrapper
+    // so the user can immediately run `phpvm use <something>` and have it apply.
+
+    Ok(())
+}
+
+/// List remote versions available for install (from the manifest).
+///
+/// Versions are printed one per line, newest first.
+pub fn list_remote() -> Result<()> {
+    let project_dir = config::current_project_dir()?;
+    let cfg = config::load_config(&project_dir)?;
+    let mf = manifest::fetch_from_config(&cfg)?;
+    let mut versions = mf.available_versions();
+    versions.sort_by(|a, b| {
+        // Sort descending by semver (newest first); fall back to string cmp.
+        let va = semver::Version::parse(a);
+        let vb = semver::Version::parse(b);
+        match (&va, &vb) {
+            (Ok(va), Ok(vb)) => vb.cmp(va).then(b.cmp(a)),
+            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+            (Err(_), Err(_)) => b.cmp(a),
+        }
+    });
+    versions.dedup();
+    for v in versions {
+        println!("{}", v);
+    }
+    Ok(())
+}
+
+/// Show runtime metadata for a version specifier (resolved via installed or manifest).
+///
+/// Output includes PHP version, bundled Composer, profile, and extension list.
+pub fn show_info(spec: &str) -> Result<()> {
+    // Prefer resolving against locally installed runtimes (works offline).
+    let installed = runner::installed_versions().unwrap_or_default();
+    let resolved = if let Ok(r) = resolve_specifier(spec, &installed) {
+        r
+    } else {
+        // Fall back to manifest (supports discovery of not-yet-installed versions).
+        let project_dir = config::current_project_dir()?;
+        let cfg = config::load_config(&project_dir)?;
+        let mf = manifest::fetch_from_config(&cfg)?;
+        resolve_specifier(spec, &mf.available_versions())?
+    };
+
+    // Best-effort metadata lookup from manifest (may be cached or fail offline).
+    let entry = {
+        config::current_project_dir()
+            .ok()
+            .and_then(|pd| config::load_config(&pd).ok())
+            .and_then(|c| manifest::fetch_from_config(&c).ok())
+            .and_then(|m| m.find(&resolved).cloned())
+    };
+
+    if let Some(e) = entry {
+        let exts = profile::builtin(&e.profile)
+            .map(|p| p.extensions)
+            .unwrap_or_default();
+
+        println!("{:<12}{}", "PHP:", e.php);
+        println!("{:<12}{}", "Composer:", e.composer);
+        println!("{:<12}{}", "Profile:", e.profile);
+        if !exts.is_empty() {
+            println!();
+            println!("Extensions:");
+            for ext in &exts {
+                println!("  {}", ext);
+            }
+        }
+    } else {
+        // No manifest data available (stale/offline); report what we know.
+        println!("{:<12}{}", "PHP:", resolved);
+        println!("{:<12}unknown", "Composer:");
+        println!("{:<12}unknown", "Profile:");
     }
 
     Ok(())
@@ -275,6 +588,53 @@ fn filter_matching(available: &[String], major: u32, minor: u32) -> Vec<PhpVersi
             }
         })
         .collect()
+}
+
+/// Determine which installed version should be considered "current" for display in `ls`.
+///
+/// Resolution order (highest priority first):
+/// 1. The PHPVM_VERSION environment variable (set by `eval "$(phpvm use X)"`).
+///    This lets `phpvm ls` show the actively "used" runtime in the current shell.
+/// 2. If the project/global config specifies `php_constraint`, resolve it against the
+///    installed list (picks best matching installed version).
+/// 3. Otherwise, pick the highest (latest) installed version.
+fn compute_current_version(installed: &[String]) -> Option<String> {
+    if installed.is_empty() {
+        return None;
+    }
+
+    // Highest priority: explicit activation via `phpvm use` in *this* shell (env var set by eval).
+    if let Ok(active) = std::env::var("PHPVM_VERSION") {
+        if installed.iter().any(|v| v == &active) {
+            return Some(active);
+        }
+    }
+
+    // Next: the persisted value written by `phpvm use` in any previous session.
+    // This makes the last `use`d version active in new terminals.
+    if let Some(active) = config::get_current_version() {
+        if installed.iter().any(|v| v == &active) {
+            return Some(active);
+        }
+    }
+
+    // Then: project/global config php_constraint.
+    if let Ok(project_dir) = config::current_project_dir() {
+        if let Ok(cfg) = config::load_config(&project_dir) {
+            if let Some(constr) = &cfg.php_constraint {
+                if let Ok(res) = resolve_specifier(constr, installed) {
+                    return Some(res);
+                }
+            }
+        }
+    }
+    // Fallback: highest installed version (for display purposes).
+    let mut parsed: Vec<PhpVersion> = installed
+        .iter()
+        .filter_map(|s| PhpVersion::parse(s).ok())
+        .collect();
+    parsed.sort();
+    parsed.last().map(|v| v.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +710,14 @@ mod tests {
     fn parse_bare_zero_minor() {
         let spec = parse("8.0").unwrap();
         assert_eq!(spec, VersionSpecifier::LatestMinor { major: 8, minor: 0 });
+    }
+
+    #[test]
+    fn parse_latest_bare() {
+        let spec = parse("latest").unwrap();
+        assert_eq!(spec, VersionSpecifier::Latest);
+        let spec = parse("Latest").unwrap();
+        assert_eq!(spec, VersionSpecifier::Latest);
     }
 
     // -----------------------------------------------------------------------
@@ -569,6 +937,27 @@ mod tests {
     fn resolve_specifier_parse_error() {
         let available = vers(&["8.3.12"]);
         let result = resolve_specifier("garbage", &available);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_latest_picks_highest_overall() {
+        let available = vers(&["8.3.12", "8.4.5", "8.2.99", "7.4.33"]);
+        let result = resolve_specifier("latest", &available).unwrap();
+        assert_eq!(result, "8.4.5");
+    }
+
+    #[test]
+    fn resolve_latest_single() {
+        let available = vers(&["8.1.0"]);
+        let result = resolve_specifier("latest", &available).unwrap();
+        assert_eq!(result, "8.1.0");
+    }
+
+    #[test]
+    fn resolve_latest_empty() {
+        let available: Vec<String> = vec![];
+        let result = resolve_specifier("latest", &available);
         assert!(result.is_err());
     }
 

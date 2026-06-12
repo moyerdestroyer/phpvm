@@ -26,7 +26,12 @@ fn main() -> Result<()> {
         Command::Doctor { .. } => doctor::run_with_format(format)?,
         Command::ReleaseCheck { .. } => doctor::release_check_with_format(format)?,
         Command::Profiles { .. } => profile::list_profiles(format)?,
-        Command::Versions => version::list_installed()?,
+        Command::Ls | Command::Versions => version::list_installed()?,
+        Command::LsRemote => version::list_remote()?,
+        Command::Info { version } => version::show_info(&version)?,
+        Command::Use { version } => version::activate(&version)?,
+        Command::Env { version } => version::print_env(version.as_deref())?,
+        Command::Current => version::show_current()?,
     }
 
     Ok(())

@@ -205,6 +205,29 @@ Priority order for test coverage:
 - Update documentation if you change behavior.
 - Keep PRs small and reviewable. If a PR needs more than 400 lines of explanation, split it.
 
+### Releasing
+
+Packaging and distribution is handled by GitHub Releases + a small installer script (see the approved packaging plan and `.github/workflows/release.yml` + `install.sh`).
+
+Typical release steps:
+
+1. Update `version` in `Cargo.toml` (and any copy in docs if still present).
+2. Run the three gates locally and fix anything.
+3. Commit the version bump (message e.g. `release: v0.2.0`).
+4. `git tag -a v0.2.0 -m "0.2.0 — <very short summary>"`
+5. `git push origin v0.2.0`
+6. Watch the "release" workflow in GitHub Actions. It will:
+   - Build stripped binaries + checksums for the supported targets
+   - Create a **draft** release
+   - Attach the archives, `.sha256` files, and a pinned copy of `install.sh`
+7. Review the draft release notes and the attached assets, then "Publish release".
+
+The public one-liner (`curl .../install.sh | bash`) and the README hero command will pick up the new version once published.
+
+Never push a tag until the PR that contains the version bump (and any user-facing changes) has passed CI and been merged to `master`.
+
+The `ci.yml` workflow runs the required gates on every PR/push, so a green `master` + passing local run is the signal that it is safe to tag.
+
 ---
 
 ## File Layout

@@ -276,18 +276,28 @@ PHPVM manages complete execution environments.
 A Runtime contains:
 
 ```text
-~/.phpvm/runtimes/8.3.23/
-
-bin/
-├── php
-└── composer
-
-extensions/
-php.ini
-metadata.json
+~/.phpvm/
+├── runtimes/                 # one directory per *exact* installed patch
+│   ├── 8.3.23/
+│   │   ├── bin/
+│   │   │   ├── php
+│   │   │   └── composer
+│   │   ├── extensions/
+│   │   └── ...
+│   └── 8.4.11/
+│       └── ...
+│
+└── composer-homes/           # user global packages, one bucket per minor series
+    ├── 8.3/
+    │   └── (this becomes COMPOSER_HOME — contains vendor/, config.json, cache/...)
+    │       └── vendor/bin/   # tools from `composer global require`
+    └── 8.4/
+        └── ...
 ```
 
 Composer is a required Runtime component.
+
+`phpvm use 8.3` (evaluated in your shell) makes the runtime's `bin/` and its global tools available as bare `php` / `composer` / global binaries for the current session. Global Composer packages are isolated per **minor series** (all 8.3.x patches share the same `composer-homes/8.3` bucket), while the PHP runtime itself remains per exact patch. Explicit `phpvm run` commands honor the same isolation.
 
 PHPVM must never rely on a host Composer installation.
 
@@ -677,4 +687,22 @@ without requiring:
 * Local PHP source builds
 
 If PHPVM makes compatibility testing boring, it has succeeded.
+
+---
+
+# Planned / Future Considerations
+
+## Per-project `use` (lightweight project pinning)
+
+Users have requested that `phpvm use` (especially with no argument) or shell integration can automatically select the appropriate runtime when inside a project directory.
+
+This should be driven by a project-local file. Candidates include:
+- A simple `.phpvm-version` file (just a version specifier such as `8.3`, `latest`, or `8.4.11`), similar to `.nvmrc` / `.node-version`.
+- Or (preferred for power users) the existing `.phpvm.toml` (which already supports `php_constraint`, `profile` (built-in or custom), matrix, etc.).
+
+Key requirement (from user feedback): the mechanism must be able to specify the *extension profile*, not just the PHP version.
+
+See the detailed TODO comment in `src/version.rs` near the `activate` and `print_env` functions.
+
+This feature is intentionally deferred so we can get the global `use` + persistent behavior solid first.
 

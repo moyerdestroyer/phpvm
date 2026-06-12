@@ -24,6 +24,11 @@ pub struct Config {
     /// Custom extension profiles defined by the user
     #[serde(default)]
     pub profiles: Vec<Profile>,
+
+    /// The version activated by `phpvm use` (persists the active runtime
+    /// across shell sessions and terminals, similar to fnm defaults).
+    #[serde(default)]
+    pub current_version: Option<String>,
 }
 
 /// Returns the PHPVM data directory.
@@ -81,6 +86,51 @@ pub fn default_matrix() -> Vec<String> {
 #[allow(dead_code)]
 pub fn resolve_matrix(config: &Config) -> Vec<String> {
     config.matrix.clone().unwrap_or_else(default_matrix)
+}
+
+/// Persist the given version as the globally active one (written to the
+/// global `~/.phpvm/config.toml` under `current_version`).
+///
+/// This is what makes `phpvm use X` affect future terminals/sessions.
+pub fn set_current_version(version: &str) -> Result<()> {
+    let dir = data_dir()?;
+    let path = dir.join("config.toml");
+
+    // Load existing global config (or defaults) so we don't clobber other settings.
+    let mut config: Config = if path.as_std_path().exists() {
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read global config at {}", path))?;
+        toml::from_str(&contents).unwrap_or_default()
+    } else {
+        Config::default()
+    };
+
+    config.current_version = Some(version.to_string());
+
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create config directory {}", dir))?;
+
+    let serialized = toml::to_string_pretty(&config)
+        .with_context(|| "Failed to serialize updated global config")?;
+    std::fs::write(&path, serialized)
+        .with_context(|| format!("Failed to write global config to {}", path))?;
+
+    Ok(())
+}
+
+/// Return the persisted current version (from `phpvm use`), if any.
+/// This is the global one stored in the user's `~/.phpvm/config.toml`.
+pub fn get_current_version() -> Option<String> {
+    let path = match data_dir() {
+        Ok(d) => d.join("config.toml"),
+        Err(_) => return None,
+    };
+    if !path.as_std_path().exists() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let cfg: Config = toml::from_str(&contents).ok()?;
+    cfg.current_version
 }
 
 /// Load config from a project-local .phpvm.toml (or global), falling back to defaults.

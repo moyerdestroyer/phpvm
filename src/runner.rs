@@ -10,11 +10,25 @@ use crate::output;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a modified PATH with the runtime's `bin/` directory prepended.
-fn build_path(bin_dir: &Utf8PathBuf) -> Result<String> {
+/// Build a modified PATH with the runtime's `bin/` and its (minor-shared)
+/// global Composer vendor/bin prepended (for tools installed via `composer global`).
+///
+/// Globals are shared across patch versions of the same minor series
+/// (all 8.3.x use the same `~/.phpvm/composer-homes/8.3/` bucket).
+/// Also ensures the composer home directory exists.
+fn build_runtime_path(runtime_path: &Utf8PathBuf, resolved: &str) -> Result<String> {
+    let bin_dir = runtime_path.join("bin");
+    let composer_home = crate::version::composer_home_for(resolved)?;
+    // Best effort: make sure it exists for global installs.
+    let _ = std::fs::create_dir_all(&composer_home);
+    let global_bin = composer_home.join("vendor").join("bin");
+
     let current_path = std::env::var("PATH").context("No PATH environment variable found")?;
     let separator = if cfg!(windows) { ";" } else { ":" };
-    Ok(format!("{}{}{}", bin_dir, separator, current_path))
+    Ok(format!(
+        "{}{}{}{}{}",
+        bin_dir, separator, global_bin, separator, current_path
+    ))
 }
 
 /// Execute a command subprocess and check its exit status.
@@ -61,8 +75,8 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
 
     output::info(&format!("Running with PHP {}", resolved));
 
-    let bin_dir = runtime_path.join("bin");
-    let new_path = build_path(&bin_dir)?;
+    let new_path = build_runtime_path(&runtime_path, &resolved)?;
+    let composer_home = crate::version::composer_home_for(&resolved)?;
 
     let (program, args) = command
         .split_first()
@@ -71,6 +85,7 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
     let status = Command::new(program)
         .args(args)
         .env("PATH", &new_path)
+        .env("COMPOSER_HOME", composer_home.as_str())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -88,8 +103,8 @@ pub fn run_silent(version: &str, command: &[String]) -> Result<()> {
     require_runtime(&resolved, version)?;
 
     let runtime_path = config::runtimes_dir()?.join(&resolved);
-    let bin_dir = runtime_path.join("bin");
-    let new_path = build_path(&bin_dir)?;
+    let new_path = build_runtime_path(&runtime_path, &resolved)?;
+    let composer_home = crate::version::composer_home_for(&resolved)?;
 
     let (program, args) = command
         .split_first()
@@ -98,6 +113,7 @@ pub fn run_silent(version: &str, command: &[String]) -> Result<()> {
     let output = Command::new(program)
         .args(args)
         .env("PATH", &new_path)
+        .env("COMPOSER_HOME", composer_home.as_str())
         .output()
         .context("Failed to execute command")?;
 
@@ -109,9 +125,13 @@ pub fn run_silent(version: &str, command: &[String]) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Resolve a version specifier against installed runtimes.
-fn resolve_runtime(version: &str) -> Result<String> {
+pub fn resolve_version(version: &str) -> Result<String> {
     let available = installed_versions()?;
     crate::version::resolve_specifier(version, &available)
+}
+
+fn resolve_runtime(version: &str) -> Result<String> {
+    resolve_version(version)
 }
 
 /// Verify the runtime directory exists at `~/.phpvm/runtimes/{resolved}/`.
@@ -147,12 +167,19 @@ mod tests {
     }
 
     #[test]
-    fn build_path_prepends_bin_dir() {
+    fn build_runtime_path_includes_bin_and_globals() {
+        // Make data_dir() return a deterministic fake base so that
+        // composer_home_for produces the expected minor bucket path.
+        std::env::set_var("PHPVM_HOME", "/home/user/.phpvm");
         // Temporarily override PATH for deterministic test.
         std::env::set_var("PATH", "/usr/bin:/bin");
-        let bin = Utf8PathBuf::from("/home/user/.phpvm/runtimes/8.3.12/bin");
-        let result = build_path(&bin).unwrap();
+        let runtime = Utf8PathBuf::from("/home/user/.phpvm/runtimes/8.3.12");
+        // Pass the resolved version so we can compute the minor-shared globals dir (8.3)
+        let result = build_runtime_path(&runtime, "8.3.12").unwrap();
+        // Should start with the runtime's own (per-patch) bin
         assert!(result.starts_with("/home/user/.phpvm/runtimes/8.3.12/bin:"));
+        // Globals are now shared per-minor under a top-level composer-homes dir
+        assert!(result.contains("/home/user/.phpvm/composer-homes/8.3/vendor/bin:"));
         assert!(result.ends_with(":/usr/bin:/bin") || result.contains(":/usr/bin:/bin"));
     }
 

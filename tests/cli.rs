@@ -85,7 +85,7 @@ fn phpvm_release_check_help() {
 }
 
 // ---------------------------------------------------------------------------
-// Versions command
+// Versions / ls command
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -95,6 +95,125 @@ fn phpvm_versions_without_runtimes() {
         .arg("versions")
         .assert()
         .success();
+}
+
+#[test]
+fn phpvm_ls_succeeds() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("ls")
+        .assert()
+        .success();
+}
+
+// ---------------------------------------------------------------------------
+// ls-remote command
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phpvm_ls_remote_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("ls-remote")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("available for install"));
+}
+
+// ---------------------------------------------------------------------------
+// info command
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phpvm_info_requires_version() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("info")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn phpvm_info_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("info")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("metadata"))
+        .stdout(predicate::str::contains("PHP version"));
+}
+
+// ---------------------------------------------------------------------------
+// use command
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phpvm_use_requires_version() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("use")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn phpvm_use_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("use")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("use"))
+        .stdout(predicate::str::contains("fnm use"))
+        .stdout(predicate::str::contains("wrapper"));
+}
+
+#[test]
+fn phpvm_use_unknown_version_fails() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("use")
+        .arg("99.99.99")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not installed"))
+        .stderr(predicate::str::contains("phpvm install"));
+}
+
+#[test]
+fn phpvm_current_succeeds() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("current")
+        .assert()
+        .success();
+}
+
+#[test]
+fn phpvm_current_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("current")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("currently active"));
+}
+
+#[test]
+fn phpvm_env_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("env")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shell integration"))
+        .stdout(predicate::str::contains("fnm"));
 }
 
 // ---------------------------------------------------------------------------

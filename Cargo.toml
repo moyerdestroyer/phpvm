@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "PHP Compatibility Manager — test and run PHP applications across multiple runtimes"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/moyerdestroyer/phpvm"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -28,3 +29,12 @@ sha2 = "0.10"
 assert_cmd = "2"
 predicates = "3"
 insta = "1"
+
+# Tuned release profile for smaller, faster distribution binaries.
+# strip + LTO keeps the downloadable artifacts reasonable for a CLI that
+# bundles reqwest + native-tls + indicatif etc.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = 3
