@@ -68,7 +68,7 @@ pub enum Command {
     /// Run a command across multiple PHP runtimes
     Matrix {
         /// Output format: human or json
-        #[arg(long, value_name = "FORMAT", default_value = "human")]
+        #[arg(long, value_name = "FORMAT", default_value = "human", value_parser = ["human", "json"])]
         report: String,
         /// Command and arguments to execute across the matrix
         #[arg(trailing_var_arg = true)]

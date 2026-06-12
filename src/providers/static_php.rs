@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::Provider;
 use crate::manifest::ManifestEntry;
+use crate::profile::Profile;
 
 /// Provider that downloads prebuilt/static PHP binaries.
 ///
@@ -25,7 +26,12 @@ impl Provider for StaticPhpProvider {
         "static_php"
     }
 
-    fn install(&self, entry: &ManifestEntry, target: &Utf8PathBuf) -> Result<()> {
+    fn install(
+        &self,
+        entry: &ManifestEntry,
+        target: &Utf8PathBuf,
+        profile: &Profile,
+    ) -> Result<()> {
         // ── 1. Download archive to a temporary file ────────────────────
         let tmp_file =
             download_archive(&entry.url).context("Failed to download runtime archive")?;
@@ -41,16 +47,23 @@ impl Provider for StaticPhpProvider {
         let _ = fs::remove_file(&tmp_file);
 
         // ── 4. Verify the extracted runtime has bin/php ───────────────
-        let bin_php = target.join("bin").join("php");
+        let bin_php = target.join("bin").join(runtime_binary_name("php"));
         if !bin_php.exists() {
             anyhow::bail!(
                 "Runtime directory {} does not contain bin/php after extraction",
                 target
             );
         }
+        let bin_composer = target.join("bin").join(runtime_binary_name("composer"));
+        if !bin_composer.exists() {
+            anyhow::bail!(
+                "Runtime directory {} does not contain bin/composer after extraction",
+                target
+            );
+        }
 
         // ── 5. Write metadata.json ────────────────────────────────────
-        write_metadata(entry, target).context("Failed to write metadata.json")?;
+        write_metadata(entry, target, profile).context("Failed to write metadata.json")?;
 
         Ok(())
     }
@@ -229,13 +242,15 @@ fn extract_tar_gz(archive_path: &Utf8PathBuf, target: &Utf8PathBuf) -> Result<()
             continue;
         }
 
-        let dest_path = target.join(&stripped);
+        let dest_path = safe_join_stripped(target, &stripped)?;
 
         // Ensure parent directories exist.
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {}", parent))?;
         }
+
+        ensure_supported_tar_entry(&entry, &dest_path)?;
 
         entry
             .unpack(dest_path.as_str())
@@ -269,12 +284,13 @@ fn extract_zip(archive_path: &Utf8PathBuf, target: &Utf8PathBuf) -> Result<()> {
         }
 
         if entry.is_dir() {
-            fs::create_dir_all(target.join(&stripped))
+            let dir_path = safe_join_stripped(target, &stripped)?;
+            fs::create_dir_all(&dir_path)
                 .with_context(|| format!("Failed to create directory {}", stripped))?;
             continue;
         }
 
-        let dest_path = target.join(&stripped);
+        let dest_path = safe_join_stripped(target, &stripped)?;
 
         // Ensure parent directories exist.
         if let Some(parent) = dest_path.parent() {
@@ -325,6 +341,51 @@ fn strip_top_dir_from_str(name: &str) -> String {
     }
 }
 
+fn safe_join_stripped(target: &Utf8PathBuf, stripped: &str) -> Result<Utf8PathBuf> {
+    let stripped_path = Path::new(stripped);
+    if stripped_path.is_absolute() {
+        anyhow::bail!("Archive entry escapes runtime directory: {}", stripped);
+    }
+
+    let mut clean = PathBuf::new();
+    for component in stripped_path.components() {
+        match component {
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("Archive entry escapes runtime directory: {}", stripped);
+            }
+        }
+    }
+
+    if clean.as_os_str().is_empty() {
+        anyhow::bail!("Archive entry has no safe destination path");
+    }
+
+    let clean_utf8 = Utf8PathBuf::from_path_buf(clean)
+        .map_err(|p| anyhow::anyhow!("Archive entry path is not valid UTF-8: {:?}", p))?;
+    Ok(target.join(clean_utf8))
+}
+
+fn ensure_supported_tar_entry(
+    entry: &tar::Entry<'_, GzDecoder<fs::File>>,
+    path: &Utf8PathBuf,
+) -> Result<()> {
+    let entry_type = entry.header().entry_type();
+    if entry_type.is_symlink() || entry_type.is_hard_link() {
+        anyhow::bail!("Archive entry {} is a link, which is not supported", path);
+    }
+    Ok(())
+}
+
+fn runtime_binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    }
+}
+
 // ── Metadata ──────────────────────────────────────────────────────────────
 
 /// Metadata written alongside an installed runtime.
@@ -333,15 +394,19 @@ struct RuntimeMetadata {
     php: String,
     composer: String,
     profile: String,
+    extensions: Vec<String>,
+    manifest_profile: String,
     installed_at: String,
 }
 
 /// Write a `metadata.json` file in the target directory.
-fn write_metadata(entry: &ManifestEntry, target: &Utf8PathBuf) -> Result<()> {
+fn write_metadata(entry: &ManifestEntry, target: &Utf8PathBuf, profile: &Profile) -> Result<()> {
     let metadata = RuntimeMetadata {
         php: entry.php.clone(),
         composer: entry.composer.clone(),
-        profile: entry.profile.clone(),
+        profile: profile.name.clone(),
+        extensions: profile.extensions.clone(),
+        manifest_profile: entry.profile.clone(),
         installed_at: iso8601_now(),
     };
 
@@ -571,7 +636,12 @@ mod tests {
             sha256: "abc123".into(),
         };
 
-        write_metadata(&entry, &target_path)?;
+        let profile = Profile {
+            name: "wordpress".into(),
+            extensions: vec!["curl".into(), "mbstring".into()],
+        };
+
+        write_metadata(&entry, &target_path, &profile)?;
 
         let meta_path = target_path.join("metadata.json");
         assert!(meta_path.exists());
@@ -581,9 +651,18 @@ mod tests {
         assert_eq!(parsed["php"], "8.3.23");
         assert_eq!(parsed["composer"], "2.9.2");
         assert_eq!(parsed["profile"], "wordpress");
+        assert_eq!(parsed["extensions"][0], "curl");
+        assert_eq!(parsed["manifest_profile"], "wordpress");
         assert!(parsed["installed_at"].is_string());
 
         Ok(())
+    }
+
+    #[test]
+    fn safe_join_rejects_parent_directory() {
+        let target = Utf8PathBuf::from("/tmp/phpvm-runtime");
+        let result = safe_join_stripped(&target, "../outside");
+        assert!(result.is_err());
     }
 
     // ── Helpers ────────────────────────────────────────────────────────

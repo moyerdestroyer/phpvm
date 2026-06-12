@@ -100,7 +100,8 @@ pub fn set_current_version(version: &str) -> Result<()> {
     let mut config: Config = if path.as_std_path().exists() {
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read global config at {}", path))?;
-        toml::from_str(&contents).unwrap_or_default()
+        toml::from_str(&contents)
+            .with_context(|| format!("Failed to parse global config at {}", path))?
     } else {
         Config::default()
     };

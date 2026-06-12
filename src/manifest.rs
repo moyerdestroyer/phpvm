@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config;
 
@@ -41,6 +42,13 @@ impl Manifest {
     /// Find an entry by exact PHP version string.
     pub fn find(&self, php_version: &str) -> Option<&ManifestEntry> {
         self.runtimes.iter().find(|e| e.php == php_version)
+    }
+
+    /// Find an entry by exact PHP version and manifest profile.
+    pub fn find_with_profile(&self, php_version: &str, profile: &str) -> Option<&ManifestEntry> {
+        self.runtimes
+            .iter()
+            .find(|e| e.php == php_version && e.profile == profile)
     }
 
     /// Find the latest (highest) patch version for a given `major.minor`.
@@ -135,7 +143,7 @@ pub fn fetch(url: &str) -> Result<Manifest> {
 /// Otherwise the URL is fetched, the result parsed, and the JSON is written
 /// into `cache_dir / manifest.json` for future use.
 pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
-    let cache_path = cache_dir.join("manifest.json");
+    let cache_path = manifest_cache_path(url, cache_dir);
     let max_age = Duration::from_secs(3600); // 1 hour
 
     // Try to use the cached copy if it exists and is fresh.
@@ -210,6 +218,9 @@ pub fn parse_manifest(json: &str) -> Result<Manifest> {
         if entry.composer.is_empty() {
             anyhow::bail!("Manifest entry {} has an empty Composer version", i);
         }
+        if entry.profile.is_empty() {
+            anyhow::bail!("Manifest entry {} has an empty profile", i);
+        }
         if entry.url.is_empty() {
             anyhow::bail!("Manifest entry {} has an empty URL", i);
         }
@@ -247,6 +258,13 @@ fn parse_file(path: &camino::Utf8Path) -> Result<Manifest> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("Failed to read cached manifest from {}", path))?;
     parse_manifest(&json)
+}
+
+fn manifest_cache_path(url: &str, cache_dir: &Utf8PathBuf) -> Utf8PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    cache_dir.join(format!("manifest-{}.json", &digest[..16]))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -490,5 +508,13 @@ mod tests {
     #[test]
     fn default_manifest_url_is_https() {
         assert!(DEFAULT_MANIFEST_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn manifest_cache_path_depends_on_url() {
+        let cache_dir = Utf8PathBuf::from("/tmp/phpvm-cache");
+        let first = manifest_cache_path("https://example.com/one.json", &cache_dir);
+        let second = manifest_cache_path("https://example.com/two.json", &cache_dir);
+        assert_ne!(first, second);
     }
 }

@@ -26,9 +26,9 @@ pub fn run_with_format(command: &[String], format: OutputFormat) -> Result<()> {
 
     for version in &versions {
         match runner::run_silent(version, command) {
-            Ok(_) => {
+            Ok(run) => {
                 entries.push(MatrixEntry {
-                    php_version: version.clone(),
+                    php_version: run.resolved_version,
                     status: RunStatus::Pass,
                     output: None,
                 });

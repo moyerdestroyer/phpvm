@@ -1,6 +1,7 @@
 use std::fmt;
 
 use anyhow::{bail, Result};
+use serde::Deserialize;
 
 use crate::config;
 use crate::manifest;
@@ -510,6 +511,25 @@ pub fn show_info(spec: &str) -> Result<()> {
         resolve_specifier(spec, &mf.available_versions())?
     };
 
+    if let Some(metadata) = read_installed_metadata(&resolved) {
+        println!("{:<12}{}", "PHP:", metadata.php);
+        println!("{:<12}{}", "Composer:", metadata.composer);
+        println!("{:<12}{}", "Profile:", metadata.profile);
+        if let Some(manifest_profile) = metadata.manifest_profile {
+            if manifest_profile != metadata.profile {
+                println!("{:<12}{}", "Artifact:", manifest_profile);
+            }
+        }
+        if !metadata.extensions.is_empty() {
+            println!();
+            println!("Extensions:");
+            for ext in &metadata.extensions {
+                println!("  {}", ext);
+            }
+        }
+        return Ok(());
+    }
+
     // Best-effort metadata lookup from manifest (may be cached or fail offline).
     let entry = {
         config::current_project_dir()
@@ -588,6 +608,26 @@ fn filter_matching(available: &[String], major: u32, minor: u32) -> Vec<PhpVersi
             }
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct InstalledRuntimeMetadata {
+    php: String,
+    composer: String,
+    profile: String,
+    #[serde(default)]
+    extensions: Vec<String>,
+    #[serde(default)]
+    manifest_profile: Option<String>,
+}
+
+fn read_installed_metadata(resolved: &str) -> Option<InstalledRuntimeMetadata> {
+    let metadata_path = config::runtimes_dir()
+        .ok()?
+        .join(resolved)
+        .join("metadata.json");
+    let contents = std::fs::read_to_string(metadata_path).ok()?;
+    serde_json::from_str(&contents).ok()
 }
 
 /// Determine which installed version should be considered "current" for display in `ls`.

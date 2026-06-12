@@ -128,6 +128,10 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
 
     let recommended_matrix = config::resolve_matrix(&config);
 
+    if matches!(format, OutputFormat::Human) {
+        warn_if_matrix_may_conflict_with_constraint(&recommended_matrix, php_constraint.as_deref());
+    }
+
     // Show extensions for the resolved profile.
     if let Some(ref p) = resolved_profile {
         if !p.extensions.is_empty() && matches!(format, OutputFormat::Human) {
@@ -165,6 +169,9 @@ pub fn release_check_with_format(format: OutputFormat) -> Result<()> {
     let php_constraint = read_php_constraint(&project_dir);
 
     let matrix = config::resolve_matrix(&config);
+    if matches!(format, OutputFormat::Human) {
+        warn_if_matrix_may_conflict_with_constraint(&matrix, php_constraint.as_deref());
+    }
 
     // Actually execute a basic verification command against each matrix version
     // using the real runner. This makes release-check report true status instead
@@ -179,9 +186,9 @@ pub fn release_check_with_format(format: OutputFormat) -> Result<()> {
     let mut entries: Vec<MatrixEntry> = Vec::new();
     for v in &matrix {
         match runner::run_silent(v, &check_cmd) {
-            Ok(_) => {
+            Ok(run) => {
                 entries.push(MatrixEntry {
-                    php_version: v.clone(),
+                    php_version: run.resolved_version,
                     status: RunStatus::Pass,
                     output: None,
                 });
@@ -207,9 +214,67 @@ pub fn release_check_with_format(format: OutputFormat) -> Result<()> {
 
     output::print_release_check_result(&result, format);
 
-    // Do not bail here (unlike matrix); the result data (PASS/FAIL per entry)
-    // communicates the truth to the user/JSON consumer. Return Ok so output is shown.
+    if matches!(result.overall, RunStatus::Fail) {
+        anyhow::bail!("Release check failed");
+    }
+
     Ok(())
+}
+
+fn warn_if_matrix_may_conflict_with_constraint(matrix: &[String], constraint: Option<&str>) {
+    let Some((major, minor)) = constraint.and_then(extract_min_major_minor) else {
+        return;
+    };
+
+    let conflicting: Vec<&str> = matrix
+        .iter()
+        .map(String::as_str)
+        .filter(|version| {
+            let Some((entry_major, entry_minor)) = extract_leading_major_minor(version) else {
+                return false;
+            };
+            (entry_major, entry_minor) < (major, minor)
+        })
+        .collect();
+
+    if !conflicting.is_empty() {
+        output::warn(&format!(
+            "composer.json asks for PHP {}.{} or newer; matrix also includes {}. \
+             PHPVM will run what you selected.",
+            major,
+            minor,
+            conflicting.join(", ")
+        ));
+    }
+}
+
+fn extract_min_major_minor(constraint: &str) -> Option<(u32, u32)> {
+    for prefix in [">=", "^", "~"] {
+        if let Some(rest) = constraint.trim().strip_prefix(prefix) {
+            return extract_leading_major_minor(rest.trim());
+        }
+    }
+    extract_leading_major_minor(constraint.trim())
+}
+
+fn extract_leading_major_minor(input: &str) -> Option<(u32, u32)> {
+    let mut parts = input.split('.');
+    let major = leading_u32(parts.next()?)?;
+    let minor = leading_u32(parts.next()?)?;
+    Some((major, minor))
+}
+
+fn leading_u32(input: &str) -> Option<u32> {
+    let digits: String = input
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -413,5 +478,13 @@ mod tests {
     #[test]
     fn recommend_unknown_profile_defaults_to_minimal() {
         assert_eq!(recommend_profile("Some Framework"), "minimal");
+    }
+
+    #[test]
+    fn extract_min_major_minor_from_common_constraints() {
+        assert_eq!(extract_min_major_minor(">=8.4"), Some((8, 4)));
+        assert_eq!(extract_min_major_minor("^8.2"), Some((8, 2)));
+        assert_eq!(extract_min_major_minor("~8.1.0"), Some((8, 1)));
+        assert_eq!(extract_min_major_minor(">=8.1 || ^8.2"), Some((8, 1)));
     }
 }

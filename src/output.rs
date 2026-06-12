@@ -156,7 +156,14 @@ pub fn print_matrix_result(result: &MatrixResult, format: OutputFormat) {
             for entry in &result.entries {
                 match entry.status {
                     RunStatus::Pass => success(&format!("{} {}", entry.php_version, entry.status)),
-                    RunStatus::Fail => error(&format!("{} {}", entry.php_version, entry.status)),
+                    RunStatus::Fail => {
+                        error(&format!("{} {}", entry.php_version, entry.status));
+                        if let Some(output) = &entry.output {
+                            for line in output.lines() {
+                                list_item(line);
+                            }
+                        }
+                    }
                 }
             }
             blank();
@@ -234,7 +241,14 @@ pub fn print_release_check_result(result: &ReleaseCheckResult, format: OutputFor
             for entry in &result.entries {
                 match entry.status {
                     RunStatus::Pass => success(&format!("{} {}", entry.php_version, entry.status)),
-                    RunStatus::Fail => error(&format!("{} {}", entry.php_version, entry.status)),
+                    RunStatus::Fail => {
+                        error(&format!("{} {}", entry.php_version, entry.status));
+                        if let Some(output) = &entry.output {
+                            for line in output.lines() {
+                                list_item(line);
+                            }
+                        }
+                    }
                 }
             }
 

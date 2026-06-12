@@ -3,6 +3,7 @@ use camino::Utf8PathBuf;
 
 use super::Provider;
 use crate::manifest::ManifestEntry;
+use crate::profile::Profile;
 
 /// Provider that uses a locally-installed PHP runtime.
 ///
@@ -18,7 +19,12 @@ impl Provider for LocalProvider {
         "local"
     }
 
-    fn install(&self, _entry: &ManifestEntry, _target: &Utf8PathBuf) -> Result<()> {
+    fn install(
+        &self,
+        _entry: &ManifestEntry,
+        _target: &Utf8PathBuf,
+        _profile: &Profile,
+    ) -> Result<()> {
         anyhow::bail!(
             "Local provider creates a symlink to host PHP. \
              This violates host independence and is not recommended for compatibility testing."

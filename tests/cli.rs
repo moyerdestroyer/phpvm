@@ -250,7 +250,8 @@ fn phpvm_release_check_in_empty_dir() {
         .unwrap()
         .arg("release-check")
         .assert()
-        .success();
+        .failure()
+        .stdout(predicate::str::contains("RELEASE BLOCKED"));
 }
 
 #[test]
@@ -260,7 +261,7 @@ fn phpvm_release_check_json_in_empty_dir() {
         .arg("release-check")
         .arg("--json")
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("\"entries\""));
 }
 
@@ -275,6 +276,20 @@ fn phpvm_matrix_requires_command() {
         .arg("matrix")
         .assert()
         .failure();
+}
+
+#[test]
+fn phpvm_matrix_rejects_unknown_report_format() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("matrix")
+        .arg("--report")
+        .arg("jsno")
+        .arg("php")
+        .arg("-v")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
 }
 
 // ---------------------------------------------------------------------------

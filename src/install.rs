@@ -31,7 +31,22 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
     // Fetch the manifest to know which versions are available.
     // Respects config.manifest_url if set in .phpvm.toml or global config.
     let mf = manifest::fetch_from_config(&config)?;
-    let available = mf.available_versions();
+    let profile_versions: Vec<String> = mf
+        .runtimes
+        .iter()
+        .filter(|entry| entry.profile == resolved_profile.name)
+        .map(|entry| entry.php.clone())
+        .collect();
+    let available = if profile_versions.is_empty() {
+        output::warn(&format!(
+            "Manifest has no artifact for profile '{}'; recording the selected profile \
+             and using the available runtime for the PHP version.",
+            resolved_profile.name
+        ));
+        mf.available_versions()
+    } else {
+        profile_versions
+    };
 
     // Resolve the user's specifier against the available versions.
     let resolved = crate::version::resolve_specifier(version, &available)?;
@@ -47,13 +62,21 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
 
     // Fetch manifest entry for the resolved version.
     let manifest_entry = mf
-        .find(&resolved)
+        .find_with_profile(&resolved, &resolved_profile.name)
+        .or_else(|| mf.find(&resolved))
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("PHP version {} not found in manifest", resolved))?;
+    if manifest_entry.profile != resolved_profile.name {
+        output::warn(&format!(
+            "Runtime artifact is tagged with manifest profile '{}'; PHPVM will record \
+             your selected profile '{}' and its configured extensions.",
+            manifest_entry.profile, resolved_profile.name
+        ));
+    }
 
     // Download and verify the runtime.
     let provider = providers::default_provider();
-    provider.install(&manifest_entry, &runtime_path)?;
+    provider.install(&manifest_entry, &runtime_path, &resolved_profile)?;
 
     output::success(&format!("Installed PHP {}", resolved));
     Ok(())

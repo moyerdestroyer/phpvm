@@ -6,6 +6,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf;
 
 use crate::manifest::ManifestEntry;
+use crate::profile::Profile;
 
 /// A runtime provider knows how to install and set up a PHP runtime.
 pub trait Provider {
@@ -14,7 +15,8 @@ pub trait Provider {
     fn name(&self) -> &str;
 
     /// Install a runtime described by the manifest entry into the target directory.
-    fn install(&self, entry: &ManifestEntry, target: &Utf8PathBuf) -> Result<()>;
+    fn install(&self, entry: &ManifestEntry, target: &Utf8PathBuf, profile: &Profile)
+        -> Result<()>;
 }
 
 /// Return the default provider (static_php for V1).

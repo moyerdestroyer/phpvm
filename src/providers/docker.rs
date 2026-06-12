@@ -3,6 +3,7 @@ use camino::Utf8PathBuf;
 
 use super::Provider;
 use crate::manifest::ManifestEntry;
+use crate::profile::Profile;
 
 /// Provider that uses Docker containers for PHP runtimes.
 ///
@@ -16,7 +17,12 @@ impl Provider for DockerProvider {
         "docker"
     }
 
-    fn install(&self, _entry: &ManifestEntry, _target: &Utf8PathBuf) -> Result<()> {
+    fn install(
+        &self,
+        _entry: &ManifestEntry,
+        _target: &Utf8PathBuf,
+        _profile: &Profile,
+    ) -> Result<()> {
         anyhow::bail!("Docker provider is not yet implemented")
     }
 }
