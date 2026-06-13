@@ -8,18 +8,39 @@
 
 The simple way to run and test your PHP applications against multiple real versions — without touching (or needing) your host PHP or Composer.
 
-## Install
+## Install & update
+
+phpvm is a single standalone binary. **Install and update use the same command** — re-running it downloads the latest release and replaces the existing binary. Your PHP runtimes in `~/.phpvm/` are left alone.
 
 ```bash
-# One command (macOS + Linux)
 curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 ```
 
-The installer places a standalone `phpvm` binary in `~/.local/bin` (customize with `PHPVM_INSTALL_DIR`).
+The script fetches a prebuilt binary from [GitHub Releases](https://github.com/moyerdestroyer/phpvm/releases), verifies its checksum, and installs to `~/.local/bin/phpvm`.
 
-- Requires only `curl`, `tar`, and `sha256sum`/`shasum` (standard on modern systems).
-- Manual downloads and older versions: [GitHub Releases](https://github.com/moyerdestroyer/phpvm/releases)
-- If you have Rust: `cargo install --git https://github.com/moyerdestroyer/phpvm`
+**Platforms:** Linux x86_64, macOS Intel, macOS Apple Silicon.
+
+**Host requirements:** `curl`, `tar`, and `sha256sum` or `shasum` (standard on modern systems). No PHP, Composer, or Rust required.
+
+**PATH:** If `phpvm` is not found after install, add `~/.local/bin` to your shell profile — the installer prints the exact line if needed.
+
+**Pin a version** (install a specific release or downgrade):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.1.0 bash
+```
+
+**Custom install directory** (use the same value when updating):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_INSTALL_DIR=$HOME/bin bash
+```
+
+**Build from source** (developers with Rust):
+
+```bash
+cargo install --git https://github.com/moyerdestroyer/phpvm
+```
 
 ## Background
 
@@ -70,13 +91,24 @@ See `phpvm --help` and subcommand help for options (including JSON output).
 
 - Per-project version + profile selection (e.g. a `.phpvm-version` file or using the existing project `.phpvm.toml`). See TODOs in `src/version.rs` (near `activate` / `print_env`). Any such mechanism should carry the full extension profile, not just a PHP version string.
 
-## Update / Uninstall
+## Uninstall
 
-Re-run the curl command above (or set `PHPVM_VERSION`).
+Delete the CLI binary:
 
-To remove the binary: `rm ~/.local/bin/phpvm` (or use `PHPVM_UNINSTALL=1` with the installer).
+```bash
+rm ~/.local/bin/phpvm
+```
 
-Runtimes live separately in `~/.phpvm/` if you want to clean them too.
+(Use your `PHPVM_INSTALL_DIR` path if you customized it.)
+
+Or run the installer in uninstall mode:
+
+```bash
+export PHPVM_UNINSTALL=1
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
+```
+
+Downloaded PHP runtimes, profiles, and config live separately under `~/.phpvm/`. Remove that directory too if you want a full cleanup.
 
 ## Learn more
 
