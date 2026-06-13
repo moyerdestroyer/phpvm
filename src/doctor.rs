@@ -136,7 +136,17 @@ pub fn run() -> Result<()> {
 pub fn run_with_format(format: OutputFormat) -> Result<()> {
     let project_dir = config::current_project_dir()?;
     let config = config::load_config(&project_dir)?;
-    let mf = crate::manifest::fetch_from_config(&config).ok();
+    let mf = match crate::manifest::fetch_from_config(&config) {
+        Ok(mf) => Some(mf),
+        Err(e) => {
+            if matches!(format, OutputFormat::Human) {
+                output::warn(&format!(
+                    "Could not fetch manifest: {e}. Extension recommendations may be incomplete."
+                ));
+            }
+            None
+        }
+    };
 
     let project_type = detect_project_type(&project_dir);
     let php_constraint = read_php_constraint(&project_dir);

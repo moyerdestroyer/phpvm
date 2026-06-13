@@ -257,16 +257,20 @@ pub fn list_installed() -> Result<()> {
     Ok(())
 }
 
-/// Build the shell export snippet for activating a specific resolved runtime.
-/// Used by both `activate` (for `use`) and the `env` command.
-///
-/// Note: composer globals (COMPOSER_HOME) are shared across all patch versions
-/// of the same minor series (all 8.3.x share one `composer-homes/8.3` bucket).
-fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> String {
-    let bin_dir = runtime_path.join("bin");
-    let composer_home = composer_home_for(resolved).expect("valid resolved version");
-    let global_bin = composer_home.join("vendor").join("bin");
+fn phprc_value(runtime_path: &camino::Utf8Path) -> Option<String> {
     let php_ini = crate::runtime_metadata::active_php_ini(runtime_path);
+    if php_ini.exists() {
+        php_ini.parent().map(|dir| dir.to_string())
+    } else {
+        None
+    }
+}
+
+/// Build the shell export snippet for activating a specific resolved runtime.
+fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> Result<String> {
+    let bin_dir = runtime_path.join("bin");
+    let composer_home = composer_home_for(resolved)?;
+    let global_bin = composer_home.join("vendor").join("bin");
 
     let separator = if cfg!(windows) { ";" } else { ":" };
     let path_value = format!(
@@ -274,19 +278,17 @@ fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> 
         bin_dir, separator, global_bin, separator, "$PATH"
     );
 
-    let phprc_export = if php_ini.exists() {
-        format!("export PHPRC=\"{}\"\n", php_ini)
-    } else {
-        String::new()
-    };
+    let phprc_export = phprc_value(runtime_path)
+        .map(|dir| format!("export PHPRC=\"{}\"\n", dir))
+        .unwrap_or_default();
 
-    format!(
+    Ok(format!(
         r#"export PHPVM_VERSION="{}"
 export COMPOSER_HOME="{}"
 export PATH="{}"
 {}"#,
         resolved, composer_home, path_value, phprc_export
-    )
+    ))
 }
 
 /// Activate a runtime for the current shell by printing an eval-able snippet.
@@ -363,7 +365,7 @@ pub fn activate(spec: &str) -> Result<()> {
          `eval \"$(phpvm env)\"` in your shell rc once.)",
         resolved, runtime_path
     );
-    let snippet = build_activation_snippet(&resolved, &runtime_path);
+    let snippet = build_activation_snippet(&resolved, &runtime_path)?;
     print!("{}", snippet);
 
     Ok(())
@@ -452,8 +454,9 @@ pub fn print_env(version: Option<&str>) -> Result<()> {
                         let _ = std::fs::create_dir_all(&composer_home);
                     }
 
-                    let snippet = build_activation_snippet(&resolved, &runtime_path);
-                    print!("{}", snippet);
+                    if let Ok(snippet) = build_activation_snippet(&resolved, &runtime_path) {
+                        print!("{}", snippet);
+                    }
                 } else {
                     eprintln!(
                         "phpvm env: runtime {} not found on disk (wrapper installed anyway)",

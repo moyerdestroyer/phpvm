@@ -18,10 +18,6 @@ use crate::runtime_metadata;
 /// Globals are shared across patch versions of the same minor series
 /// (all 8.3.x use the same `~/.phpvm/composer-homes/8.3/` bucket).
 /// Also ensures the composer home directory exists.
-fn runtime_php_ini(runtime_path: &Utf8PathBuf) -> Utf8PathBuf {
-    runtime_metadata::active_php_ini(runtime_path)
-}
-
 fn apply_runtime_env(cmd: &mut Command, runtime_path: &Utf8PathBuf, resolved: &str) -> Result<()> {
     let new_path = build_runtime_path(runtime_path, resolved)?;
     let composer_home = crate::version::composer_home_for(resolved)?;
@@ -29,9 +25,11 @@ fn apply_runtime_env(cmd: &mut Command, runtime_path: &Utf8PathBuf, resolved: &s
     cmd.env("COMPOSER_HOME", composer_home.as_str());
     cmd.env("PHPVM_VERSION", resolved);
 
-    let php_ini = runtime_php_ini(runtime_path);
-    if php_ini.exists() {
-        cmd.env("PHPRC", php_ini.as_str());
+    if let Some(etc_dir) = runtime_metadata::active_php_ini(runtime_path)
+        .parent()
+        .filter(|p| p.exists())
+    {
+        cmd.env("PHPRC", etc_dir.as_str());
     }
 
     Ok(())

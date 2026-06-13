@@ -148,7 +148,10 @@ impl Manifest {
 
 /// Fetch the manifest from a URL.
 pub fn fetch(url: &str) -> Result<Manifest> {
-    let resp = reqwest::blocking::get(url)
+    let client = crate::net::blocking_client()?;
+    let resp = client
+        .get(url)
+        .send()
         .with_context(|| format!("Failed to fetch manifest from {}", url))?
         .error_for_status()
         .with_context(|| format!("Manifest fetch returned error status from {}", url))?;
@@ -265,6 +268,22 @@ fn normalize_manifest(mut manifest: Manifest) -> Result<Manifest> {
 }
 
 fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<ManifestEntry> {
+    if entries.len() > 1 {
+        let mut urls = std::collections::BTreeSet::new();
+        let mut checksums = std::collections::BTreeSet::new();
+        for entry in &entries {
+            urls.insert(entry.url.as_str());
+            checksums.insert(entry.sha256.as_str());
+        }
+        if urls.len() > 1 || checksums.len() > 1 {
+            anyhow::bail!(
+                "Manifest has conflicting runtime artifacts for PHP {}. \
+                 Publish one full binary per version (manifest v2).",
+                php
+            );
+        }
+    }
+
     let mut extensions: Vec<String> = Vec::new();
     for entry in &entries {
         if !entry.extensions.is_empty() {
@@ -313,6 +332,21 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         if entry.sha256.is_empty() {
             anyhow::bail!("Manifest entry {} has an empty sha256", i);
         }
+        let normalized = entry.sha256.trim();
+        if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!(
+                "Manifest entry {} has invalid sha256 (expected 64 hex chars): '{}'",
+                i,
+                entry.sha256
+            );
+        }
+        if !entry.url.starts_with("https://") {
+            anyhow::bail!(
+                "Manifest entry {} must use an https:// download URL, got '{}'",
+                i,
+                entry.url
+            );
+        }
         semver::Version::parse(&entry.php).with_context(|| {
             format!(
                 "Manifest entry {} has invalid PHP version: '{}'",
@@ -350,6 +384,7 @@ fn manifest_cache_path(url: &str, cache_dir: &Utf8PathBuf) -> Utf8PathBuf {
 mod tests {
     use super::*;
 
+
     const FIXTURE_V1_JSON: &str = r#"{
   "runtimes": [
     {
@@ -357,28 +392,28 @@ mod tests {
       "composer": "2.6.0",
       "profile": "minimal",
       "url": "https://example.com/php-8.1.0.tar.gz",
-      "sha256": "abc123"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
     },
     {
       "php": "8.2.0",
       "composer": "2.8.0",
       "profile": "wordpress",
       "url": "https://example.com/php-8.2.0.tar.gz",
-      "sha256": "def456"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000002"
     },
     {
       "php": "8.3.12",
       "composer": "2.9.2",
       "profile": "laravel",
       "url": "https://example.com/php-8.3.12.tar.gz",
-      "sha256": "ghi789"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
     },
     {
       "php": "8.3.23",
       "composer": "2.9.2",
       "profile": "wordpress",
       "url": "https://example.com/php-8.3.23.tar.gz",
-      "sha256": "jkl012"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000004"
     }
   ]
 }"#;
@@ -404,7 +439,7 @@ mod tests {
       "composer": "2.9.2",
       "extensions": ["curl", "dom", "gd", "intl", "mbstring", "mysqli", "openssl", "pdo_mysql", "tokenizer", "xml", "zip"],
       "url": "https://example.com/php-8.3.23-full.tar.gz",
-      "sha256": "full123"
+      "sha256": "00000000000000000000000000000000000000000000000000000000000000ab"
     }
   ]
 }"#;
@@ -459,7 +494,7 @@ mod tests {
     {
       "php": "8.1.0",
       "composer": "2.6.0",
-      "sha256": "abc123"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
     }
   ]
 }"#;
@@ -474,7 +509,7 @@ mod tests {
       "php": "",
       "composer": "2.6.0",
       "url": "https://example.com/php-8.1.0.tar.gz",
-      "sha256": "abc123"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
     }
   ]
 }"#;
@@ -489,7 +524,7 @@ mod tests {
       "php": "8-point-what",
       "composer": "2.6.0",
       "url": "https://example.com/php-8.1.0.tar.gz",
-      "sha256": "abc123"
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
     }
   ]
 }"#;

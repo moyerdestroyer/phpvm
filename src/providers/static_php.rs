@@ -37,34 +37,61 @@ impl Provider for StaticPhpProvider {
         catalog: &[String],
     ) -> Result<()> {
         // ── 1. Download archive to a temporary file ────────────────────
-        let tmp_file =
+        let archive_file =
             download_archive(&entry.url).context("Failed to download runtime archive")?;
+        let archive_path = Utf8PathBuf::from_path_buf(archive_file.path().to_path_buf())
+            .map_err(|p| anyhow::anyhow!("Temporary archive path is not valid UTF-8: {:?}", p))?;
 
         // ── 2. Verify SHA-256 checksum ────────────────────────────────
-        verify_checksum(&tmp_file, &entry.sha256)
+        verify_checksum(&archive_path, &entry.sha256)
             .context("SHA-256 checksum verification failed")?;
 
-        // ── 3. Extract archive to target directory ────────────────────
-        extract_archive(&tmp_file, target).context("Failed to extract runtime archive")?;
+        // ── 3. Extract to a staging directory, then move atomically ───
+        let staging_path = target
+            .parent()
+            .map(|p| {
+                p.join(format!(
+                    ".staging-{}",
+                    target.file_name().unwrap_or("runtime")
+                ))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Invalid runtime target path {}", target))?;
 
-        // Clean up the temporary file after extraction.
-        let _ = fs::remove_file(&tmp_file);
+        if staging_path.exists() {
+            fs::remove_dir_all(&staging_path)
+                .with_context(|| format!("Failed to clear staging directory {}", staging_path))?;
+        }
 
-        // ── 4. Verify the extracted runtime has bin/php ───────────────
-        let bin_php = target.join("bin").join(runtime_binary_name("php"));
+        extract_archive(&archive_path, &staging_path)
+            .context("Failed to extract runtime archive")?;
+
+        // ── 4. Verify the extracted runtime has bin/php + bin/composer ─
+        let bin_php = staging_path.join("bin").join(runtime_binary_name("php"));
         if !bin_php.exists() {
+            let _ = fs::remove_dir_all(&staging_path);
             anyhow::bail!(
                 "Runtime directory {} does not contain bin/php after extraction",
-                target
+                staging_path
             );
         }
-        let bin_composer = target.join("bin").join(runtime_binary_name("composer"));
+        let bin_composer = staging_path
+            .join("bin")
+            .join(runtime_binary_name("composer"));
         if !bin_composer.exists() {
+            let _ = fs::remove_dir_all(&staging_path);
             anyhow::bail!(
                 "Runtime directory {} does not contain bin/composer after extraction",
-                target
+                staging_path
             );
         }
+
+        if target.exists() {
+            fs::remove_dir_all(target)
+                .with_context(|| format!("Failed to replace existing runtime {}", target))?;
+        }
+
+        fs::rename(&staging_path, target)
+            .with_context(|| format!("Failed to move staged runtime into {}", target))?;
 
         // ── 5. Apply initial profile ini preset + metadata ────────────
         apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
@@ -78,22 +105,17 @@ impl Provider for StaticPhpProvider {
 
 /// Download the runtime archive from `url` to a temporary file.
 ///
-/// Returns the path to the temporary file. The caller is responsible for
-/// deleting it after use.
-fn download_archive(url: &str) -> Result<Utf8PathBuf> {
-    // Create a temporary file. We use `.keep()` to persist the file so we can
-    // reopen it later; the OS will clean up when phpvm exits.
-    let (tmp_file, tmp_path) = tempfile::Builder::new()
+/// The temporary file is deleted when the returned handle is dropped.
+fn download_archive(url: &str) -> Result<tempfile::NamedTempFile> {
+    let mut tmp_file = tempfile::Builder::new()
         .suffix(&archive_suffix(url))
         .tempfile()
-        .context("Failed to create temporary file for download")?
-        .keep()
-        .context("Failed to persist temporary file")?;
+        .context("Failed to create temporary file for download")?;
 
-    // Drop the handle so we can read the file later for checksum verification.
-    drop(tmp_file);
-
-    let response = reqwest::blocking::get(url)
+    let client = crate::net::blocking_client()?;
+    let response = client
+        .get(url)
+        .send()
         .with_context(|| format!("Failed to connect to {}", url))?
         .error_for_status()
         .with_context(|| format!("Download returned error status from {}", url))?;
@@ -121,8 +143,7 @@ fn download_archive(url: &str) -> Result<Utf8PathBuf> {
         );
     }
 
-    let mut file = fs::File::create(&tmp_path)
-        .with_context(|| format!("Failed to create download file {}", tmp_path.display()))?;
+    let mut file = tmp_file.as_file_mut();
 
     let mut downloaded: u64 = 0;
     let mut buffer = [0u8; 8192];
@@ -136,15 +157,14 @@ fn download_archive(url: &str) -> Result<Utf8PathBuf> {
             break;
         }
         io::Write::write_all(&mut file, &buffer[..bytes_read])
-            .with_context(|| format!("Failed to write to {}", tmp_path.display()))?;
+            .with_context(|| "Failed to write downloaded archive to temporary file")?;
         downloaded += bytes_read as u64;
         progress.set_position(downloaded);
     }
 
     progress.finish_with_message("Download complete");
 
-    Utf8PathBuf::from_path_buf(tmp_path)
-        .map_err(|p| anyhow::anyhow!("Temporary path is not valid UTF-8: {:?}", p))
+    Ok(tmp_file)
 }
 
 /// Determine an appropriate temporary file suffix from the archive URL.
@@ -183,11 +203,12 @@ fn verify_checksum(path: &Utf8PathBuf, expected: &str) -> Result<()> {
     }
 
     let actual = format!("{:x}", hasher.finalize());
+    let expected_norm = expected.trim().to_ascii_lowercase();
 
-    if actual != expected {
+    if actual != expected_norm {
         anyhow::bail!(
             "SHA-256 checksum mismatch: expected {}, got {}",
-            expected,
+            expected_norm,
             actual
         );
     }
@@ -599,7 +620,7 @@ mod tests {
             profile: None,
             extensions: vec!["curl".into(), "mbstring".into()],
             url: "https://example.com/php-8.3.23.tar.gz".into(),
-            sha256: "abc123".into(),
+            sha256: "00000000000000000000000000000000000000000000000000000000000000ab".into(),
         };
         let catalog = entry.extensions.clone();
 

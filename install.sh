@@ -2,10 +2,10 @@
 #
 # phpvm installer
 # Usage (recommended):
-#   curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 #
 # Advanced:
-#   PHPVM_VERSION=0.2.0 PHPVM_INSTALL_DIR=$HOME/bin bash install.sh
+#   PHPVM_VERSION=0.1.0 PHPVM_INSTALL_DIR=$HOME/bin bash install.sh
 #   PHPVM_UNINSTALL=1 bash install.sh
 #
 # The script downloads a prebuilt binary from GitHub Releases, verifies its
@@ -161,7 +161,12 @@ extract_binary() {
   local archive="$1"
   local outdir="$2"
 
-  # We control the archives we produce: they contain the bare "phpvm" binary.
+  while IFS= read -r member; do
+    if [[ "$member" == /* ]] || [[ "$member" == *".."* ]]; then
+      err "Archive contains unsafe path: ${member}"
+    fi
+  done < <(tar -tzf "$archive")
+
   tar -xzf "$archive" -C "$outdir"
 }
 
@@ -223,6 +228,9 @@ main() {
     if [[ "$t" == "$target" ]]; then supported=1; break; fi
   done
   if [[ $supported -eq 0 ]]; then
+    if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
+      err "Linux arm64 (aarch64) is not supported yet. Published targets: ${SUPPORTED_TARGETS[*]}. See https://github.com/${REPO}/releases for manual downloads."
+    fi
     err "Detected target '${target}' is not yet supported by releases. Supported: ${SUPPORTED_TARGETS[*]}. See https://github.com/${REPO}/releases for manual downloads."
   fi
 

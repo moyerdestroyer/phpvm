@@ -4,6 +4,7 @@ mod doctor;
 mod install;
 mod manifest;
 mod matrix;
+mod net;
 mod output;
 mod profile;
 mod profile_preset;
@@ -61,10 +62,10 @@ fn main() -> Result<()> {
         Command::LsRemote => version::list_remote()?,
         Command::Info { version } => version::show_info(&version)?,
         Command::Use { version, profile } => {
-            version::activate(&version)?;
-            if let Some(profile_name) = profile {
-                profile::use_profile(&profile_name, Some(&version))?;
+            if let Some(profile_name) = &profile {
+                profile::use_profile(profile_name, Some(&version))?;
             }
+            version::activate(&version)?;
         }
         Command::Env { version } => version::print_env(version.as_deref())?,
         Command::Current => version::show_current()?,

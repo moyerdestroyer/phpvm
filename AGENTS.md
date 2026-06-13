@@ -241,9 +241,8 @@ Typical release steps:
    - Build stripped binaries + checksums for the supported targets
    - Create a **draft** release
    - Attach the archives, `.sha256` files, and a pinned copy of `install.sh`
-7. Review the draft release notes and the attached assets, then "Publish release".
-
-The public one-liner (`curl .../install.sh | bash`) and the README hero command will pick up the new version once published.
+7. Review the draft release notes and the attached assets, then **Publish release** (required — draft releases are invisible to `install.sh`'s `/releases/latest` lookup and asset downloads fail until published).
+8. Smoke test after publishing: `curl .../install.sh | bash`, `phpvm install`, `phpvm run`.
 
 Never push a tag until the PR that contains the version bump (and any user-facing changes) has passed CI and been merged to `master`.
 

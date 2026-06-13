@@ -45,10 +45,7 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
 
     let runtimes_dir = config::runtimes_dir()?;
     let runtime_path = runtimes_dir.join(&resolved);
-    let runtime_installed = runtime_path
-        .join("bin")
-        .join(if cfg!(windows) { "php.exe" } else { "php" })
-        .exists();
+    let runtime_installed = runtime_is_complete(&runtime_path);
 
     if runtime_installed {
         if let Some(active) = RuntimeMetadata::read_active_profile(&resolved)? {
@@ -92,4 +89,16 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
 
     output::success(&format!("Installed PHP {} ({})", resolved, profile_label));
     Ok(())
+}
+
+fn runtime_is_complete(runtime_path: &camino::Utf8Path) -> bool {
+    let php = runtime_path
+        .join("bin")
+        .join(if cfg!(windows) { "php.exe" } else { "php" });
+    let composer = runtime_path.join("bin").join(if cfg!(windows) {
+        "composer.exe"
+    } else {
+        "composer"
+    });
+    php.exists() && composer.exists()
 }

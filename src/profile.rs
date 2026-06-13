@@ -118,7 +118,7 @@ pub fn use_profile(profile_name: &str, version_spec: Option<&str>) -> Result<()>
         .path,
     )?;
 
-    output::success(&format!(
+    output::success_stderr(&format!(
         "Switched PHP {} to profile '{}' ({} extensions enabled)",
         resolved,
         profile_name,
@@ -364,7 +364,7 @@ pub fn fork_preset(src: &str, dst: &str, version_spec: Option<&str>) -> Result<(
     Ok(())
 }
 
-/// Resolve enabled extensions for a named preset (for doctor/info).
+/// Resolve enabled extensions for a named preset (for doctor/info; read-only).
 pub fn enabled_extensions_for_preset(
     name: &str,
     project_dir: &camino::Utf8Path,
@@ -380,14 +380,16 @@ pub fn enabled_extensions_for_preset(
         })
         .unwrap_or_default();
 
-    let resolved = profile_preset::resolve_preset(
-        name,
-        project_dir,
-        runtime_dir.as_deref().unwrap_or(project_dir),
-        mf,
-        &catalog,
-    )?;
-    profile_preset::parse_enabled_extensions_from_file(&resolved.path)
+    let runtime_lookup = runtime_dir
+        .as_deref()
+        .unwrap_or_else(|| camino::Utf8Path::new("/nonexistent"));
+
+    if let Some(preset) = profile_preset::find_existing_preset(name, project_dir, runtime_lookup)? {
+        return profile_preset::parse_enabled_extensions_from_file(&preset.path);
+    }
+
+    let content = profile_preset::starter_content(name, mf, &catalog)?;
+    Ok(profile_preset::parse_enabled_extensions(&content))
 }
 
 fn default_preset_name(

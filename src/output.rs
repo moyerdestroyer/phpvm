@@ -37,10 +37,24 @@ pub fn success(message: &str) {
     print(Level::Success, message);
 }
 
+/// Print a success message to stderr (safe when stdout is eval-able shell output).
+pub fn success_stderr(message: &str) {
+    print_stderr(Level::Success, message);
+}
+
 /// Print a warning message.
-#[allow(dead_code)]
 pub fn warn(message: &str) {
     print(Level::Warning, message);
+}
+
+fn print_stderr(level: Level, message: &str) {
+    let styled = match level {
+        Level::Info => style(message).cyan().to_string(),
+        Level::Success => style(message).green().to_string(),
+        Level::Warning => style(message).yellow().to_string(),
+        Level::Error => style(message).red().to_string(),
+    };
+    eprintln!("{}", styled);
 }
 
 /// Print an error message.

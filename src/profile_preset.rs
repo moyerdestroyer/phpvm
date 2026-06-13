@@ -55,6 +55,26 @@ const BUNDLED_MINIMAL: &str = include_str!("../profiles/minimal.ini");
 
 const BUILTIN_NAMES: &[&str] = &["wordpress", "laravel", "minimal"];
 
+/// Validate a profile preset name (safe for use as a filename stem).
+pub fn validate_profile_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Profile name cannot be empty");
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("Profile name cannot contain path separators");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        anyhow::bail!(
+            "Profile name '{}' contains invalid characters (use letters, numbers, _, -, .)",
+            name
+        );
+    }
+    Ok(())
+}
+
 /// Project-local preset directory: `<project>/.phpvm/profiles/`.
 pub fn project_profiles_dir(project_dir: &Utf8Path) -> Utf8PathBuf {
     project_dir.join(".phpvm").join("profiles")
@@ -135,6 +155,44 @@ pub fn materialize_starter_if_missing(dest: &Utf8Path, content: &str) -> Result<
     Ok(true)
 }
 
+/// Look up an existing preset without materializing starters.
+pub fn find_existing_preset(
+    name: &str,
+    project_dir: &Utf8Path,
+    runtime_dir: &Utf8Path,
+) -> Result<Option<ResolvedPreset>> {
+    validate_profile_name(name)?;
+
+    let project_path = preset_file_path(&project_profiles_dir(project_dir), name);
+    if project_path.exists() {
+        return Ok(Some(ResolvedPreset {
+            name: name.to_string(),
+            path: project_path,
+            source: PresetSource::Project,
+        }));
+    }
+
+    let global_path = preset_file_path(&global_profiles_dir()?, name);
+    if global_path.exists() {
+        return Ok(Some(ResolvedPreset {
+            name: name.to_string(),
+            path: global_path,
+            source: PresetSource::Global,
+        }));
+    }
+
+    let runtime_path = runtime_metadata::profile_ini_path(runtime_dir, name);
+    if runtime_path.exists() {
+        return Ok(Some(ResolvedPreset {
+            name: name.to_string(),
+            path: runtime_path,
+            source: PresetSource::Runtime,
+        }));
+    }
+
+    Ok(None)
+}
+
 /// Resolve a preset by name following project → global → runtime → materialize order.
 pub fn resolve_preset(
     name: &str,
@@ -143,33 +201,13 @@ pub fn resolve_preset(
     manifest: Option<&Manifest>,
     catalog: &[String],
 ) -> Result<ResolvedPreset> {
-    let project_path = preset_file_path(&project_profiles_dir(project_dir), name);
-    if project_path.exists() {
-        return Ok(ResolvedPreset {
-            name: name.to_string(),
-            path: project_path,
-            source: PresetSource::Project,
-        });
+    validate_profile_name(name)?;
+
+    if let Some(preset) = find_existing_preset(name, project_dir, runtime_dir)? {
+        return Ok(preset);
     }
 
     let global_path = preset_file_path(&global_profiles_dir()?, name);
-    if global_path.exists() {
-        return Ok(ResolvedPreset {
-            name: name.to_string(),
-            path: global_path,
-            source: PresetSource::Global,
-        });
-    }
-
-    let runtime_path = runtime_metadata::profile_ini_path(runtime_dir, name);
-    if runtime_path.exists() {
-        return Ok(ResolvedPreset {
-            name: name.to_string(),
-            path: runtime_path,
-            source: PresetSource::Runtime,
-        });
-    }
-
     let content = starter_content(name, manifest, catalog)?;
     materialize_starter_if_missing(&global_path, &content)?;
     Ok(ResolvedPreset {
@@ -321,6 +359,11 @@ pub fn create_preset(
     manifest: Option<&Manifest>,
     catalog: &[String],
 ) -> Result<Utf8PathBuf> {
+    validate_profile_name(name)?;
+    if let Some(template) = from_template {
+        validate_profile_name(template)?;
+    }
+
     let dir = if global {
         global_profiles_dir()?
     } else {
@@ -357,6 +400,9 @@ pub fn fork_preset(
     manifest: Option<&Manifest>,
     catalog: &[String],
 ) -> Result<Utf8PathBuf> {
+    validate_profile_name(src)?;
+    validate_profile_name(dst)?;
+
     let resolved = resolve_preset(
         src,
         project_dir,
@@ -382,8 +428,15 @@ pub fn edit_preset(path: &Utf8Path) -> Result<()> {
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    let status = std::process::Command::new(&editor)
-        .arg(path.as_str())
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let mut cmd = std::process::Command::new(program);
+    for arg in parts {
+        cmd.arg(arg);
+    }
+    cmd.arg(path.as_str());
+
+    let status = cmd
         .status()
         .with_context(|| format!("Failed to launch editor '{editor}'"))?;
 
@@ -427,6 +480,12 @@ zend_extension=xdebug
         assert!(!materialize_starter_if_missing(&utf8_path, "new")?);
         assert_eq!(fs::read_to_string(&path)?, "original");
         Ok(())
+    }
+
+    #[test]
+    fn validate_profile_name_rejects_path_separators() {
+        assert!(validate_profile_name("../evil").is_err());
+        assert!(validate_profile_name("good-name").is_ok());
     }
 
     #[test]

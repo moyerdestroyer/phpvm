@@ -19,7 +19,7 @@ The installer places a standalone `phpvm` binary in `~/.local/bin` (customize wi
 
 - Requires only `curl`, `tar`, and `sha256sum`/`shasum` (standard on modern systems).
 - Manual downloads and older versions: [GitHub Releases](https://github.com/moyerdestroyer/phpvm/releases)
-- If you have Rust: `cargo install phpvm`
+- If you have Rust: `cargo install --git https://github.com/moyerdestroyer/phpvm`
 
 ## Background
 
