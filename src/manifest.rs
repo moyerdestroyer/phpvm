@@ -57,8 +57,9 @@ pub struct Manifest {
     pub runtimes: Vec<ManifestEntry>,
 }
 
-/// Default manifest URL.
-const DEFAULT_MANIFEST_URL: &str = "https://phpvm.com/manifest.json";
+/// Default manifest URL (phpvm-runtimes catalog on GitHub).
+const DEFAULT_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/moyerdestroyer/phpvm-runtimes/master/manifest.json";
 
 // ── Manifest methods ────────────────────────────────────────────────────
 
@@ -444,10 +445,14 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 validate_artifact(i, &format!("artifacts[{target}]"), artifact)?;
             }
         } else {
-            validate_artifact(i, "runtime", &ManifestArtifact {
-                url: entry.url.clone(),
-                sha256: entry.sha256.clone(),
-            })?;
+            validate_artifact(
+                i,
+                "runtime",
+                &ManifestArtifact {
+                    url: entry.url.clone(),
+                    sha256: entry.sha256.clone(),
+                },
+            )?;
         }
 
         semver::Version::parse(&entry.php).with_context(|| {
@@ -486,7 +491,6 @@ fn manifest_cache_path(url: &str, cache_dir: &Utf8PathBuf) -> Utf8PathBuf {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
 
     const FIXTURE_V1_JSON: &str = r#"{
   "runtimes": [
@@ -715,8 +719,10 @@ mod tests {
     }
 
     #[test]
-    fn default_manifest_url_is_https() {
+    fn default_manifest_url_points_at_phpvm_runtimes_catalog() {
         assert!(DEFAULT_MANIFEST_URL.starts_with("https://"));
+        assert!(DEFAULT_MANIFEST_URL.contains("phpvm-runtimes"));
+        assert!(DEFAULT_MANIFEST_URL.ends_with("/manifest.json"));
     }
 
     #[test]
@@ -777,6 +783,8 @@ mod tests {
         assert_eq!(manifest.runtimes.len(), 4);
         let entry = manifest.find("8.3.31").unwrap();
         let artifact = entry.download_for_host().unwrap();
-        assert!(artifact.url.contains("php-8.3.31-x86_64-unknown-linux-gnu.tar.gz"));
+        assert!(artifact
+            .url
+            .contains("php-8.3.31-x86_64-unknown-linux-gnu.tar.gz"));
     }
 }

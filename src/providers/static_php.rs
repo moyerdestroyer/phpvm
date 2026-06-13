@@ -42,8 +42,8 @@ impl Provider for StaticPhpProvider {
             .context("Failed to resolve runtime artifact for this host")?;
 
         // ── 2. Download archive to a temporary file ────────────────────
-        let archive_file = download_archive(&artifact.url)
-            .context("Failed to download runtime archive")?;
+        let archive_file =
+            download_archive(&artifact.url).context("Failed to download runtime archive")?;
         let archive_path = Utf8PathBuf::from_path_buf(archive_file.path().to_path_buf())
             .map_err(|p| anyhow::anyhow!("Temporary archive path is not valid UTF-8: {:?}", p))?;
 

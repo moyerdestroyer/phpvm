@@ -73,6 +73,8 @@ my-app/.phpvm/profiles/
 
 Bundled starters ship in the phpvm repo under `profiles/` (`wordpress.ini`, `laravel.ini`, `minimal.ini`).
 
+See also: [phpvm-runtimes publisher guide](./phpvm-runtimes.md) (companion repo layout, per-platform artifacts, catalog policy).
+
 ## Publisher checklist
 
 - [ ] Build fat static PHP binaries with the full extension catalog per version

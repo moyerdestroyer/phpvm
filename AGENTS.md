@@ -230,6 +230,8 @@ Priority order for test coverage:
 
 Packaging and distribution is handled by GitHub Releases + a small installer script (see the approved packaging plan and `.github/workflows/release.yml` + `install.sh`).
 
+See [docs/phpvm-runtimes.md](docs/phpvm-runtimes.md) for the companion runtimes repo, per-platform artifacts, and catalog policy.
+
 Typical release steps:
 
 1. Update `version` in `Cargo.toml` (and any copy in docs if still present).
