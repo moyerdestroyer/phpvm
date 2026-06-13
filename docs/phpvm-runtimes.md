@@ -283,7 +283,7 @@ Suggested tooling: [static-php-cli](https://github.com/crazywhalecc/static-php-c
 | Target | Where to build |
 |---|---|
 | `x86_64-unknown-linux-gnu` | GitHub Actions `ubuntu-22.04` or local Linux |
-| `x86_64-apple-darwin` | GitHub Actions `macos-13` |
+| `x86_64-apple-darwin` | GitHub Actions `macos-latest` (cross-compile from Apple Silicon) |
 | `aarch64-apple-darwin` | GitHub Actions `macos-latest` |
 
 Document minimum OS/glibc/macOS versions in `phpvm-runtimes/README.md` (e.g. “Linux: glibc 2.35+”, “macOS 12+”).

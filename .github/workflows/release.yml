@@ -28,8 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Intel macOS (GitHub calls the x86_64 runner "macos-13" for now)
-          - os: macos-13
+          # Intel macOS — cross-compile on Apple Silicon (macos-13 Intel runners retired)
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive_ext: tar.gz
           # Apple Silicon macOS
