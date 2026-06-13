@@ -36,17 +36,22 @@ impl Provider for StaticPhpProvider {
         manifest: Option<&Manifest>,
         catalog: &[String],
     ) -> Result<()> {
-        // ── 1. Download archive to a temporary file ────────────────────
-        let archive_file =
-            download_archive(&entry.url).context("Failed to download runtime archive")?;
+        // ── 1. Resolve per-platform artifact (manifest v2.1) ───────────
+        let artifact = entry
+            .download_for_host()
+            .context("Failed to resolve runtime artifact for this host")?;
+
+        // ── 2. Download archive to a temporary file ────────────────────
+        let archive_file = download_archive(&artifact.url)
+            .context("Failed to download runtime archive")?;
         let archive_path = Utf8PathBuf::from_path_buf(archive_file.path().to_path_buf())
             .map_err(|p| anyhow::anyhow!("Temporary archive path is not valid UTF-8: {:?}", p))?;
 
-        // ── 2. Verify SHA-256 checksum ────────────────────────────────
-        verify_checksum(&archive_path, &entry.sha256)
+        // ── 3. Verify SHA-256 checksum ────────────────────────────────
+        verify_checksum(&archive_path, &artifact.sha256)
             .context("SHA-256 checksum verification failed")?;
 
-        // ── 3. Extract to a staging directory, then move atomically ───
+        // ── 4. Extract to a staging directory, then move atomically ───
         let staging_path = target
             .parent()
             .map(|p| {
@@ -65,7 +70,7 @@ impl Provider for StaticPhpProvider {
         extract_archive(&archive_path, &staging_path)
             .context("Failed to extract runtime archive")?;
 
-        // ── 4. Verify the extracted runtime has bin/php + bin/composer ─
+        // ── 5. Verify the extracted runtime has bin/php + bin/composer ─
         let bin_php = staging_path.join("bin").join(runtime_binary_name("php"));
         if !bin_php.exists() {
             let _ = fs::remove_dir_all(&staging_path);
@@ -93,7 +98,7 @@ impl Provider for StaticPhpProvider {
         fs::rename(&staging_path, target)
             .with_context(|| format!("Failed to move staged runtime into {}", target))?;
 
-        // ── 5. Apply initial profile ini preset + metadata ────────────
+        // ── 6. Apply initial profile ini preset + metadata ────────────
         apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
             .context("Failed to apply profile")?;
 
@@ -621,6 +626,7 @@ mod tests {
             extensions: vec!["curl".into(), "mbstring".into()],
             url: "https://example.com/php-8.3.23.tar.gz".into(),
             sha256: "00000000000000000000000000000000000000000000000000000000000000ab".into(),
+            artifacts: None,
         };
         let catalog = entry.extensions.clone();
 

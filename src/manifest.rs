@@ -10,6 +10,13 @@ use sha2::{Digest, Sha256};
 use crate::config;
 use crate::profile::{self, ProfileTemplate};
 
+/// A downloadable runtime archive (manifest v2.1 per-platform artifacts).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestArtifact {
+    pub url: String,
+    pub sha256: String,
+}
+
 /// A single runtime entry from the remote manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {
@@ -27,11 +34,17 @@ pub struct ManifestEntry {
     #[serde(default)]
     pub extensions: Vec<String>,
 
-    /// Download URL for the runtime archive
+    /// Download URL for the runtime archive (manifest v2; empty when using `artifacts`).
+    #[serde(default)]
     pub url: String,
 
-    /// SHA-256 checksum of the archive
+    /// SHA-256 checksum of the archive (manifest v2; empty when using `artifacts`).
+    #[serde(default)]
     pub sha256: String,
+
+    /// Per-platform artifacts (manifest v2.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<BTreeMap<String, ManifestArtifact>>,
 }
 
 /// The full manifest: profile presets and available runtimes.
@@ -50,6 +63,33 @@ const DEFAULT_MANIFEST_URL: &str = "https://phpvm.com/manifest.json";
 // ── Manifest methods ────────────────────────────────────────────────────
 
 impl ManifestEntry {
+    /// Resolve the download artifact for the current host triple.
+    pub fn download_for_host(&self) -> Result<ManifestArtifact> {
+        if let Some(artifacts) = &self.artifacts {
+            let target = host_target()?;
+            return artifacts.get(&target).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No runtime artifact published for host target '{}'. \
+                     PHP {} is not available on this platform in the manifest.",
+                    target,
+                    self.php
+                )
+            });
+        }
+
+        if self.url.is_empty() || self.sha256.is_empty() {
+            anyhow::bail!(
+                "Manifest entry for PHP {} has no download URL or checksum",
+                self.php
+            );
+        }
+
+        Ok(ManifestArtifact {
+            url: self.url.clone(),
+            sha256: self.sha256.clone(),
+        })
+    }
+
     /// Extensions available in the installed binary for this runtime.
     pub fn extension_catalog(&self) -> Vec<String> {
         if !self.extensions.is_empty() {
@@ -216,6 +256,28 @@ pub fn fetch_from_config(config: &config::Config) -> Result<Manifest> {
     fetch_cached(url, &cache_dir)
 }
 
+/// Detect the host target triple (matches `install.sh` resolution).
+pub fn host_target() -> Result<String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => {
+            anyhow::bail!(
+                "Unsupported architecture: {} (supported: x86_64, aarch64)",
+                other
+            );
+        }
+    };
+
+    let target = match std::env::consts::OS {
+        "macos" => format!("{arch}-apple-darwin"),
+        "linux" => format!("{arch}-unknown-linux-gnu"),
+        other => anyhow::bail!("Unsupported OS: {other} (supported: linux, macos)"),
+    };
+
+    Ok(target)
+}
+
 /// Parse a JSON string into a `Manifest`.
 pub fn parse_manifest(json: &str) -> Result<Manifest> {
     let raw: Manifest =
@@ -271,9 +333,24 @@ fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<Manif
     if entries.len() > 1 {
         let mut urls = std::collections::BTreeSet::new();
         let mut checksums = std::collections::BTreeSet::new();
+        let mut artifact_maps = 0usize;
         for entry in &entries {
-            urls.insert(entry.url.as_str());
-            checksums.insert(entry.sha256.as_str());
+            if entry.artifacts.is_some() {
+                artifact_maps += 1;
+            }
+            if !entry.url.is_empty() {
+                urls.insert(entry.url.as_str());
+            }
+            if !entry.sha256.is_empty() {
+                checksums.insert(entry.sha256.as_str());
+            }
+        }
+        if artifact_maps > 1 {
+            anyhow::bail!(
+                "Manifest has conflicting per-platform artifacts for PHP {}. \
+                 Publish one runtime row per version (manifest v2.1).",
+                php
+            );
         }
         if urls.len() > 1 || checksums.len() > 1 {
             anyhow::bail!(
@@ -315,7 +392,39 @@ fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<Manif
         extensions,
         url: base.url,
         sha256: base.sha256,
+        artifacts: base.artifacts,
     })
+}
+
+fn validate_artifact(entry_index: usize, label: &str, artifact: &ManifestArtifact) -> Result<()> {
+    if artifact.url.is_empty() {
+        anyhow::bail!("Manifest entry {} {} has an empty URL", entry_index, label);
+    }
+    if artifact.sha256.is_empty() {
+        anyhow::bail!(
+            "Manifest entry {} {} has an empty sha256",
+            entry_index,
+            label
+        );
+    }
+    let normalized = artifact.sha256.trim();
+    if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "Manifest entry {} {} has invalid sha256 (expected 64 hex chars): '{}'",
+            entry_index,
+            label,
+            artifact.sha256
+        );
+    }
+    if !artifact.url.starts_with("https://") {
+        anyhow::bail!(
+            "Manifest entry {} {} must use an https:// download URL, got '{}'",
+            entry_index,
+            label,
+            artifact.url
+        );
+    }
+    Ok(())
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<()> {
@@ -326,27 +435,21 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         if entry.composer.is_empty() {
             anyhow::bail!("Manifest entry {} has an empty Composer version", i);
         }
-        if entry.url.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty URL", i);
+
+        if let Some(artifacts) = &entry.artifacts {
+            if artifacts.is_empty() {
+                anyhow::bail!("Manifest entry {} has an empty artifacts map", i);
+            }
+            for (target, artifact) in artifacts {
+                validate_artifact(i, &format!("artifacts[{target}]"), artifact)?;
+            }
+        } else {
+            validate_artifact(i, "runtime", &ManifestArtifact {
+                url: entry.url.clone(),
+                sha256: entry.sha256.clone(),
+            })?;
         }
-        if entry.sha256.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty sha256", i);
-        }
-        let normalized = entry.sha256.trim();
-        if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
-            anyhow::bail!(
-                "Manifest entry {} has invalid sha256 (expected 64 hex chars): '{}'",
-                i,
-                entry.sha256
-            );
-        }
-        if !entry.url.starts_with("https://") {
-            anyhow::bail!(
-                "Manifest entry {} must use an https:// download URL, got '{}'",
-                i,
-                entry.url
-            );
-        }
+
         semver::Version::parse(&entry.php).with_context(|| {
             format!(
                 "Manifest entry {} has invalid PHP version: '{}'",
@@ -418,6 +521,45 @@ mod tests {
   ]
 }"#;
 
+    const FIXTURE_V21_JSON: &str = r#"{
+  "schema": "2.1",
+  "profiles": [
+    {
+      "name": "wordpress",
+      "extensions": ["curl", "dom", "gd", "intl", "mbstring", "mysqli", "openssl", "pdo_mysql", "xml", "zip"]
+    },
+    {
+      "name": "laravel",
+      "extensions": ["curl", "intl", "mbstring", "openssl", "pdo_mysql", "tokenizer", "xml", "zip"]
+    },
+    {
+      "name": "minimal",
+      "extensions": []
+    }
+  ],
+  "runtimes": [
+    {
+      "php": "8.3.31",
+      "composer": "2.9.2",
+      "extensions": ["curl", "dom", "gd", "intl", "mbstring", "mysqli", "openssl", "pdo_mysql", "tokenizer", "xml", "zip"],
+      "artifacts": {
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://example.com/php-8.3.31-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "00000000000000000000000000000000000000000000000000000000000000aa"
+        },
+        "x86_64-apple-darwin": {
+          "url": "https://example.com/php-8.3.31-x86_64-apple-darwin.tar.gz",
+          "sha256": "00000000000000000000000000000000000000000000000000000000000000bb"
+        },
+        "aarch64-apple-darwin": {
+          "url": "https://example.com/php-8.3.31-aarch64-apple-darwin.tar.gz",
+          "sha256": "00000000000000000000000000000000000000000000000000000000000000cc"
+        }
+      }
+    }
+  ]
+}"#;
+
     const FIXTURE_V2_JSON: &str = r#"{
   "profiles": [
     {
@@ -450,6 +592,10 @@ mod tests {
 
     fn fixture_v2() -> Manifest {
         parse_manifest(FIXTURE_V2_JSON).unwrap()
+    }
+
+    fn fixture_v21() -> Manifest {
+        parse_manifest(FIXTURE_V21_JSON).unwrap()
     }
 
     #[test]
@@ -571,5 +717,66 @@ mod tests {
     #[test]
     fn default_manifest_url_is_https() {
         assert!(DEFAULT_MANIFEST_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn parse_v21_manifest_with_artifacts() {
+        let m = fixture_v21();
+        assert_eq!(m.runtimes.len(), 1);
+        let entry = m.find("8.3.31").unwrap();
+        assert!(entry.url.is_empty());
+        assert!(entry.sha256.is_empty());
+        assert_eq!(entry.artifacts.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn download_for_host_selects_current_target() {
+        let manifest = fixture_v21();
+        let entry = manifest.find("8.3.31").unwrap();
+        let target = host_target().unwrap();
+        let artifact = entry.download_for_host().unwrap();
+        assert!(artifact.url.contains(&target));
+        assert_eq!(artifact.sha256.len(), 64);
+    }
+
+    #[test]
+    fn download_for_host_fails_when_target_missing() {
+        let mut entry = fixture_v21().find("8.3.31").unwrap().clone();
+        let target = host_target().unwrap();
+        entry.artifacts.as_mut().unwrap().remove(&target);
+        let err = entry.download_for_host().unwrap_err().to_string();
+        assert!(err.contains(&target));
+        assert!(err.contains("not available on this platform"));
+    }
+
+    #[test]
+    fn parse_v21_without_top_level_url_is_ok() {
+        assert!(parse_manifest(FIXTURE_V21_JSON).is_ok());
+    }
+
+    #[test]
+    fn host_target_returns_supported_triple() {
+        let target = host_target().unwrap();
+        assert!(
+            target == "x86_64-unknown-linux-gnu"
+                || target == "aarch64-unknown-linux-gnu"
+                || target == "x86_64-apple-darwin"
+                || target == "aarch64-apple-darwin"
+        );
+    }
+
+    #[test]
+    fn parse_companion_runtimes_manifest_if_present() {
+        let path = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../phpvm-runtimes/manifest.json");
+        if !path.exists() {
+            return;
+        }
+        let json = fs::read_to_string(&path).unwrap();
+        let manifest = parse_manifest(&json).unwrap();
+        assert_eq!(manifest.runtimes.len(), 4);
+        let entry = manifest.find("8.3.31").unwrap();
+        let artifact = entry.download_for_host().unwrap();
+        assert!(artifact.url.contains("php-8.3.31-x86_64-unknown-linux-gnu.tar.gz"));
     }
 }

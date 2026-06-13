@@ -172,6 +172,7 @@ fn manifest_entry_for_runtime(
         extensions: catalog.to_vec(),
         url: String::new(),
         sha256: String::new(),
+        artifacts: None,
     })
 }
 
