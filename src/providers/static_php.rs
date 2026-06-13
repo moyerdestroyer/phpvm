@@ -8,8 +8,9 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 
 use super::Provider;
-use crate::manifest::ManifestEntry;
-use crate::profile::Profile;
+use crate::manifest::{Manifest, ManifestEntry};
+use crate::profile_preset;
+use crate::runtime_metadata::RuntimeMetadata;
 
 /// Provider that downloads prebuilt/static PHP binaries.
 ///
@@ -30,7 +31,10 @@ impl Provider for StaticPhpProvider {
         &self,
         entry: &ManifestEntry,
         target: &Utf8PathBuf,
-        profile: &Profile,
+        profile_name: &str,
+        project_dir: &camino::Utf8Path,
+        manifest: Option<&Manifest>,
+        catalog: &[String],
     ) -> Result<()> {
         // ── 1. Download archive to a temporary file ────────────────────
         let tmp_file =
@@ -62,8 +66,9 @@ impl Provider for StaticPhpProvider {
             );
         }
 
-        // ── 5. Write metadata.json ────────────────────────────────────
-        write_metadata(entry, target, profile).context("Failed to write metadata.json")?;
+        // ── 5. Apply initial profile ini preset + metadata ────────────
+        apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
+            .context("Failed to apply profile")?;
 
         Ok(())
     }
@@ -386,83 +391,32 @@ fn runtime_binary_name(name: &str) -> String {
     }
 }
 
-// ── Metadata ──────────────────────────────────────────────────────────────
+// ── Profile ini presets ───────────────────────────────────────────────────
 
-/// Metadata written alongside an installed runtime.
-#[derive(serde::Serialize)]
-struct RuntimeMetadata {
-    php: String,
-    composer: String,
-    profile: String,
-    extensions: Vec<String>,
-    manifest_profile: String,
-    installed_at: String,
-}
+/// Resolve, validate, activate, and persist metadata for a profile switch.
+pub fn apply_preset(
+    target: &Utf8PathBuf,
+    profile_name: &str,
+    project_dir: &camino::Utf8Path,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+    entry: &ManifestEntry,
+) -> Result<()> {
+    let preset =
+        profile_preset::resolve_preset(profile_name, project_dir, target, manifest, catalog)?;
 
-/// Write a `metadata.json` file in the target directory.
-fn write_metadata(entry: &ManifestEntry, target: &Utf8PathBuf, profile: &Profile) -> Result<()> {
-    let metadata = RuntimeMetadata {
-        php: entry.php.clone(),
-        composer: entry.composer.clone(),
-        profile: profile.name.clone(),
-        extensions: profile.extensions.clone(),
-        manifest_profile: entry.profile.clone(),
-        installed_at: iso8601_now(),
-    };
+    profile_preset::validate_preset_extensions(&preset.path, catalog)?;
+    profile_preset::activate_preset(target, &preset.path)?;
 
-    let json =
-        serde_json::to_string_pretty(&metadata).with_context(|| "Failed to serialize metadata")?;
-
-    let meta_path = target.join("metadata.json");
-    fs::write(&meta_path, json)
-        .with_context(|| format!("Failed to write metadata to {}", meta_path))?;
+    let mut metadata = RuntimeMetadata::read(&entry.php)?
+        .unwrap_or_else(|| RuntimeMetadata::from_install(entry, profile_name, &preset, catalog));
+    metadata.update_active_preset(profile_name, &preset);
+    if metadata.available_extensions.is_empty() {
+        metadata.available_extensions = catalog.to_vec();
+    }
+    metadata.write(target)?;
 
     Ok(())
-}
-
-/// Return the current UTC time as an ISO 8601 string.
-///
-/// Uses a pure-Rust Gregorian calendar conversion (no chrono crate needed). If
-/// obtaining the system time fails (extremely unlikely), falls back to the epoch.
-fn iso8601_now() -> String {
-    use std::time::SystemTime;
-
-    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(dur) => {
-            let secs = dur.as_secs();
-            let days = secs / 86400;
-            let time_of_day = secs % 86400;
-            let hours = time_of_day / 3600;
-            let minutes = (time_of_day % 3600) / 60;
-            let seconds = time_of_day % 60;
-
-            let (y, m, d) = civil_from_days(days as i64);
-
-            format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                y, m, d, hours, minutes, seconds
-            )
-        }
-        Err(_) => "1970-01-01T00:00:00Z".to_string(),
-    }
-}
-
-/// Convert days since Unix epoch (1970-01-01) to a (year, month, day) triple.
-///
-/// Uses the Howard Hinnant algorithm:
-/// http://howardhinnant.github.io/date_algorithms.html#civil_from_days
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let y = y + if m <= 2 { 1 } else { 0 };
-    (y, m, d)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -620,40 +574,56 @@ mod tests {
         Ok(())
     }
 
-    // ── write_metadata ─────────────────────────────────────────────────
+    // ── profile ini presets ───────────────────────────────────────────
 
     #[test]
-    fn write_metadata_creates_file() -> Result<()> {
+    fn apply_preset_activates_ini_and_metadata() -> Result<()> {
         let target = tempfile::TempDir::new()?;
         let target_path = Utf8PathBuf::from_path_buf(target.path().to_path_buf())
             .map_err(|p| anyhow::anyhow!("{:?}", p))?;
 
+        let project = tempfile::TempDir::new()?;
+        let project_path = Utf8PathBuf::from_path_buf(project.path().to_path_buf())
+            .map_err(|p| anyhow::anyhow!("{:?}", p))?;
+        let preset_dir = project_path.join(".phpvm").join("profiles");
+        fs::create_dir_all(&preset_dir)?;
+        let preset_path = preset_dir.join("wordpress.ini");
+        fs::write(
+            &preset_path,
+            "; test preset\nextension=curl\nextension=mbstring\n",
+        )?;
+
         let entry = ManifestEntry {
             php: "8.3.23".into(),
             composer: "2.9.2".into(),
-            profile: "wordpress".into(),
+            profile: None,
+            extensions: vec!["curl".into(), "mbstring".into()],
             url: "https://example.com/php-8.3.23.tar.gz".into(),
             sha256: "abc123".into(),
         };
+        let catalog = entry.extensions.clone();
 
-        let profile = Profile {
-            name: "wordpress".into(),
-            extensions: vec!["curl".into(), "mbstring".into()],
-        };
+        apply_preset(
+            &target_path,
+            "wordpress",
+            &project_path,
+            None,
+            &catalog,
+            &entry,
+        )?;
 
-        write_metadata(&entry, &target_path, &profile)?;
+        let active_ini = crate::runtime_metadata::active_php_ini(&target_path);
+        assert!(active_ini.exists());
+        let content = fs::read_to_string(&active_ini)?;
+        assert!(content.contains("extension=curl"));
 
         let meta_path = target_path.join("metadata.json");
         assert!(meta_path.exists());
-
         let content = fs::read_to_string(&meta_path)?;
         let parsed: serde_json::Value = serde_json::from_str(&content)?;
         assert_eq!(parsed["php"], "8.3.23");
-        assert_eq!(parsed["composer"], "2.9.2");
-        assert_eq!(parsed["profile"], "wordpress");
-        assert_eq!(parsed["extensions"][0], "curl");
-        assert_eq!(parsed["manifest_profile"], "wordpress");
-        assert!(parsed["installed_at"].is_string());
+        assert_eq!(parsed["active_profile"], "wordpress");
+        assert_eq!(parsed["enabled_extensions"][0], "curl");
 
         Ok(())
     }

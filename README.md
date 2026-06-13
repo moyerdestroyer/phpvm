@@ -12,7 +12,7 @@ The simple way to run and test your PHP applications against multiple real versi
 
 ```bash
 # One command (macOS + Linux)
-curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 ```
 
 The installer places a standalone `phpvm` binary in `~/.local/bin` (customize with `PHPVM_INSTALL_DIR`).
@@ -34,9 +34,15 @@ phpvm solves the compatibility problem:
 
 ## Quickstart
 
+Profiles are **named `.ini` preset files** — not extension lists in TOML. Author full php.ini configs in `.phpvm/profiles/` (project) or `~/.phpvm/profiles/` (global). Switch with `phpvm profile use <name>`.
+
 ```bash
-phpvm install 8.3 --profile=wordpress   # or laravel / minimal
-phpvm run 8.3 php -v
+phpvm install 8.3 --profile=wordpress   # downloads full binary once
+phpvm profile use laravel               # switch ini preset instantly (no reinstall)
+phpvm profile edit wordpress            # tweak memory, opcache, xdebug, etc.
+phpvm profile new debug --from minimal  # create a project preset
+phpvm profiles                          # list presets + source paths
+phpvm run 8.3 php -m
 phpvm run 8.3 composer install
 phpvm matrix composer test
 phpvm doctor
@@ -46,11 +52,12 @@ phpvm release-check
 phpvm ls
 phpvm ls-remote
 phpvm info 8.3
+phpvm profiles
 
 # Daily development (makes bare `php` and `composer` use a specific runtime)
 # One-time setup (add to your shell rc):
 #   eval "$(phpvm env)"
-phpvm use 8.3          # switches the current shell immediately + persists
+phpvm use 8.3 --profile=laravel  # activate version + profile in one step
 php -v
 composer --version
 ```

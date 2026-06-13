@@ -71,9 +71,41 @@ pub fn read_php_constraint(project_dir: &Utf8Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Profile recommendation
-// ---------------------------------------------------------------------------
+/// Read required PHP extensions from `composer.json` (`ext-*` in require/require-dev).
+pub fn read_required_extensions(project_dir: &Utf8Path) -> Vec<String> {
+    let composer_path = project_dir.join("composer.json");
+    let content = match fs::read_to_string(composer_path.as_std_path()) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut extensions = Vec::new();
+    for section in ["require", "require-dev"] {
+        if let Some(requirements) = parsed.get(section).and_then(|v| v.as_object()) {
+            for (key, _) in requirements {
+                if let Some(ext) = key.strip_prefix("ext-") {
+                    if !extensions.iter().any(|e| e == ext) {
+                        extensions.push(ext.to_string());
+                    }
+                }
+            }
+        }
+    }
+    extensions.sort();
+    extensions
+}
+
+fn missing_extensions_for_preset(required: &[String], enabled: &[String]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|ext| !enabled.iter().any(|e| e == *ext))
+        .cloned()
+        .collect()
+}
 
 /// Recommend an extension profile based on the detected project type.
 ///
@@ -90,15 +122,6 @@ pub fn recommend_profile(project_type: &str) -> String {
     .to_string()
 }
 
-/// Resolve a profile name to a full Profile struct, checking built-ins
-/// first, then custom profiles from config.
-pub fn resolve_profile(
-    profile_name: &str,
-    custom_profiles: &[profile::Profile],
-) -> profile::Profile {
-    profile::resolve_or_minimal(profile_name, custom_profiles)
-}
-
 // ---------------------------------------------------------------------------
 // Doctor inspection
 // ---------------------------------------------------------------------------
@@ -113,18 +136,29 @@ pub fn run() -> Result<()> {
 pub fn run_with_format(format: OutputFormat) -> Result<()> {
     let project_dir = config::current_project_dir()?;
     let config = config::load_config(&project_dir)?;
+    let mf = crate::manifest::fetch_from_config(&config).ok();
 
     let project_type = detect_project_type(&project_dir);
     let php_constraint = read_php_constraint(&project_dir);
+    let required_extensions = read_required_extensions(&project_dir);
 
     let profile_name = config
         .profile
         .clone()
         .or_else(|| project_type.as_ref().map(|pt| recommend_profile(pt)));
 
-    let resolved_profile = profile_name
+    let enabled_extensions = profile_name
         .as_deref()
-        .map(|name| resolve_profile(name, &config.profiles));
+        .and_then(|name| {
+            profile::enabled_extensions_for_preset(name, &project_dir, mf.as_ref()).ok()
+        })
+        .unwrap_or_default();
+
+    let missing_extensions = if profile_name.is_some() {
+        missing_extensions_for_preset(&required_extensions, &enabled_extensions)
+    } else {
+        Vec::new()
+    };
 
     let recommended_matrix = config::resolve_matrix(&config);
 
@@ -132,17 +166,19 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         warn_if_matrix_may_conflict_with_constraint(&recommended_matrix, php_constraint.as_deref());
     }
 
-    // Show extensions for the resolved profile.
-    if let Some(ref p) = resolved_profile {
-        if !p.extensions.is_empty() && matches!(format, OutputFormat::Human) {
-            output::info(&format!("Profile extensions: {}", p.extensions.join(", ")));
-        }
+    if !enabled_extensions.is_empty() && matches!(format, OutputFormat::Human) {
+        output::info(&format!(
+            "Enabled extensions: {}",
+            enabled_extensions.join(", ")
+        ));
     }
 
     let result = DoctorResult {
         project_type,
         php_constraint,
         profile: profile_name,
+        required_extensions,
+        missing_extensions,
         recommended_matrix,
     };
 
@@ -456,6 +492,27 @@ mod tests {
 
         let result = read_php_constraint(&utf8(&dir));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_required_extensions_from_composer_json() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            &dir,
+            "composer.json",
+            r#"{
+  "require": {
+    "ext-curl": "*",
+    "ext-mbstring": "*"
+  },
+  "require-dev": {
+    "ext-tokenizer": "*"
+  }
+}"#,
+        );
+
+        let extensions = read_required_extensions(&utf8(&dir));
+        assert_eq!(extensions, vec!["curl", "mbstring", "tokenizer"]);
     }
 
     // -- recommend_profile ----------------------------------------------------

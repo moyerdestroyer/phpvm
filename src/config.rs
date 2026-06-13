@@ -3,16 +3,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::profile::Profile;
-
-/// PHPVM configuration, loaded from ~/.phpvm/config.toml or project-local .phpvm.toml
+/// PHPVM configuration, loaded from ~/.phpvm/config.toml merged with project-local .phpvm.toml
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Default PHP version constraint (e.g. ">=8.1")
     pub php_constraint: Option<String>,
 
-    /// Default profile (wordpress, laravel, minimal, or a custom profile name)
+    /// Default profile preset name (wordpress, laravel, minimal, or custom)
     pub profile: Option<String>,
 
     /// Matrix of PHP versions to test against
@@ -20,10 +18,6 @@ pub struct Config {
 
     /// Remote manifest URL
     pub manifest_url: Option<String>,
-
-    /// Custom extension profiles defined by the user
-    #[serde(default)]
-    pub profiles: Vec<Profile>,
 
     /// The version activated by `phpvm use` (persists the active runtime
     /// across shell sessions and terminals, similar to fnm defaults).
@@ -52,8 +46,6 @@ pub fn data_dir() -> Result<Utf8PathBuf> {
 }
 
 /// Returns the current project directory (CWD) as a `Utf8PathBuf`.
-/// This is the single helper for current_dir + camino conversion + consistent
-/// error context (addresses repeated boilerplate and enforces Utf8 paths).
 pub fn current_project_dir() -> Result<Utf8PathBuf> {
     let p = std::env::current_dir().context("Failed to get current directory")?;
     Utf8PathBuf::from_path_buf(p)
@@ -88,24 +80,26 @@ pub fn resolve_matrix(config: &Config) -> Vec<String> {
     config.matrix.clone().unwrap_or_else(default_matrix)
 }
 
+/// Load global config from `~/.phpvm/config.toml`, or defaults.
+pub fn load_global_config() -> Result<Config> {
+    let global_config = data_dir()?.join("config.toml");
+    if global_config.as_std_path().exists() {
+        let contents = std::fs::read_to_string(global_config.as_std_path())
+            .with_context(|| format!("Failed to read global config at {}", global_config))?;
+        let config: Config = toml::from_str(&contents)
+            .with_context(|| format!("Failed to parse global config at {}", global_config))?;
+        return Ok(config);
+    }
+    Ok(Config::default())
+}
+
 /// Persist the given version as the globally active one (written to the
 /// global `~/.phpvm/config.toml` under `current_version`).
-///
-/// This is what makes `phpvm use X` affect future terminals/sessions.
 pub fn set_current_version(version: &str) -> Result<()> {
     let dir = data_dir()?;
     let path = dir.join("config.toml");
 
-    // Load existing global config (or defaults) so we don't clobber other settings.
-    let mut config: Config = if path.as_std_path().exists() {
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read global config at {}", path))?;
-        toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse global config at {}", path))?
-    } else {
-        Config::default()
-    };
-
+    let mut config = load_global_config()?;
     config.current_version = Some(version.to_string());
 
     std::fs::create_dir_all(&dir)
@@ -120,38 +114,42 @@ pub fn set_current_version(version: &str) -> Result<()> {
 }
 
 /// Return the persisted current version (from `phpvm use`), if any.
-/// This is the global one stored in the user's `~/.phpvm/config.toml`.
 pub fn get_current_version() -> Option<String> {
-    let path = match data_dir() {
-        Ok(d) => d.join("config.toml"),
-        Err(_) => return None,
-    };
-    if !path.as_std_path().exists() {
-        return None;
-    }
-    let contents = std::fs::read_to_string(&path).ok()?;
-    let cfg: Config = toml::from_str(&contents).ok()?;
-    cfg.current_version
+    load_global_config().ok()?.current_version
 }
 
-/// Load config from a project-local .phpvm.toml (or global), falling back to defaults.
-/// `project_dir` should be a valid UTF-8 path (use `current_project_dir()`).
+/// Load config: global `~/.phpvm/config.toml` overlaid by project `.phpvm.toml`.
+///
+/// Project wins on `profile`, `php_constraint`, `matrix`, and `manifest_url`.
+/// `current_version` is global-only.
 pub fn load_config(project_dir: &Utf8Path) -> Result<Config> {
+    let mut config = load_global_config()?;
+
     let local_config = project_dir.join(".phpvm.toml");
     if local_config.as_std_path().exists() {
-        let contents = std::fs::read_to_string(local_config.as_std_path())?;
-        let config: Config = toml::from_str(&contents)?;
-        return Ok(config);
+        let contents = std::fs::read_to_string(local_config.as_std_path())
+            .with_context(|| format!("Failed to read project config at {}", local_config))?;
+        let project: Config = toml::from_str(&contents)
+            .with_context(|| format!("Failed to parse project config at {}", local_config))?;
+        merge_project_config(&mut config, &project);
     }
 
-    let global_config = data_dir()?.join("config.toml");
-    if global_config.as_std_path().exists() {
-        let contents = std::fs::read_to_string(global_config.as_std_path())?;
-        let config: Config = toml::from_str(&contents)?;
-        return Ok(config);
-    }
+    Ok(config)
+}
 
-    Ok(Config::default())
+fn merge_project_config(base: &mut Config, project: &Config) {
+    if project.php_constraint.is_some() {
+        base.php_constraint = project.php_constraint.clone();
+    }
+    if project.profile.is_some() {
+        base.profile = project.profile.clone();
+    }
+    if project.matrix.is_some() {
+        base.matrix = project.matrix.clone();
+    }
+    if project.manifest_url.is_some() {
+        base.manifest_url = project.manifest_url.clone();
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +160,9 @@ mod tests {
 
     fn write_file(dir: &TempDir, name: &str, contents: &str) {
         let path = dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
     }
@@ -214,7 +215,6 @@ profile = "laravel"
         assert!(config.profile.is_none());
         assert!(config.matrix.is_none());
         assert!(config.manifest_url.is_none());
-        assert!(config.profiles.is_empty());
     }
 
     #[test]
@@ -313,49 +313,45 @@ profile = "wordpress"
         assert_eq!(resolved, default_matrix());
     }
 
-    // -- Custom profiles in config --
-
     #[test]
-    fn parse_config_with_custom_profiles() {
-        let toml = r#"
-profile = "drupal"
+    fn load_config_merges_project_over_global() {
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
 
-[[profiles]]
-name = "drupal"
-extensions = ["curl", "dom", "gd", "mbstring", "mysqli", "pdo_mysql", "xml", "zip"]
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.profile.as_deref(), Some("drupal"));
-        assert_eq!(config.profiles.len(), 1);
-        assert_eq!(config.profiles[0].name, "drupal");
-        assert_eq!(config.profiles[0].extensions.len(), 8);
-        assert!(config.profiles[0].extensions.contains(&"curl".to_string()));
-    }
+        let phpvm_home = home.path().join(".phpvm");
+        std::fs::create_dir_all(&phpvm_home).unwrap();
+        write_file(
+            &home,
+            ".phpvm/config.toml",
+            r#"
+profile = "minimal"
+php_constraint = ">=8.0"
+matrix = ["8.0.latest"]
+"#,
+        );
 
-    #[test]
-    fn parse_config_with_multiple_custom_profiles() {
-        let toml = r#"
-profile = "api"
+        write_file(
+            &project,
+            ".phpvm.toml",
+            r#"
+profile = "wordpress"
+"#,
+        );
 
-[[profiles]]
-name = "api"
-extensions = ["curl", "json", "mbstring", "openssl"]
+        let prev = std::env::var("PHPVM_HOME").ok();
+        std::env::set_var("PHPVM_HOME", phpvm_home.to_string_lossy().to_string());
 
-[[profiles]]
-name = "drupal"
-extensions = ["curl", "dom", "gd", "mbstring", "mysql", "pdo_mysql", "xml", "zip"]
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.profiles.len(), 2);
-        assert_eq!(config.profiles[0].name, "api");
-        assert_eq!(config.profiles[0].extensions.len(), 4);
-        assert_eq!(config.profiles[1].name, "drupal");
-        assert_eq!(config.profiles[1].extensions.len(), 8);
-    }
+        let config = load_config(&utf8_project_dir(&project)).unwrap();
+        assert_eq!(config.profile.as_deref(), Some("wordpress"));
+        assert_eq!(config.php_constraint.as_deref(), Some(">=8.0"));
+        assert_eq!(
+            config.matrix.as_deref(),
+            Some(&["8.0.latest".to_string()][..])
+        );
 
-    #[test]
-    fn config_without_profiles_defaults_to_empty() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.profiles.is_empty());
+        match prev {
+            Some(v) => std::env::set_var("PHPVM_HOME", v),
+            None => std::env::remove_var("PHPVM_HOME"),
+        }
     }
 }

@@ -6,6 +6,7 @@ use camino::Utf8PathBuf;
 
 use crate::config;
 use crate::output;
+use crate::runtime_metadata;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,6 +18,24 @@ use crate::output;
 /// Globals are shared across patch versions of the same minor series
 /// (all 8.3.x use the same `~/.phpvm/composer-homes/8.3/` bucket).
 /// Also ensures the composer home directory exists.
+fn runtime_php_ini(runtime_path: &Utf8PathBuf) -> Utf8PathBuf {
+    runtime_metadata::active_php_ini(runtime_path)
+}
+
+fn apply_runtime_env(cmd: &mut Command, runtime_path: &Utf8PathBuf, resolved: &str) -> Result<()> {
+    let new_path = build_runtime_path(runtime_path, resolved)?;
+    let composer_home = crate::version::composer_home_for(resolved)?;
+    cmd.env("PATH", &new_path);
+    cmd.env("COMPOSER_HOME", composer_home.as_str());
+    cmd.env("PHPVM_VERSION", resolved);
+
+    let php_ini = runtime_php_ini(runtime_path);
+    if php_ini.exists() {
+        cmd.env("PHPRC", php_ini.as_str());
+    }
+
+    Ok(())
+}
 fn build_runtime_path(runtime_path: &Utf8PathBuf, resolved: &str) -> Result<String> {
     let bin_dir = runtime_path.join("bin");
     let composer_home = crate::version::composer_home_for(resolved)?;
@@ -123,21 +142,18 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
 
     output::info(&format!("Running with PHP {}", resolved));
 
-    let new_path = build_runtime_path(&runtime_path, &resolved)?;
-    let composer_home = crate::version::composer_home_for(&resolved)?;
-
     let (program, args) = command
         .split_first()
         .context("run requires a non-empty command")?;
     let program = resolve_program(&runtime_path, &resolved, program)?;
 
-    let status = Command::new(&program)
-        .args(args)
-        .env("PATH", &new_path)
-        .env("COMPOSER_HOME", composer_home.as_str())
-        .env("PHPVM_VERSION", &resolved)
+    let mut cmd = Command::new(&program);
+    cmd.args(args)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    apply_runtime_env(&mut cmd, &runtime_path, &resolved)?;
+
+    let status = cmd
         .spawn()
         .context("Failed to execute command")?
         .wait()
@@ -154,23 +170,18 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
 pub fn run_silent(version: &str, command: &[String]) -> Result<SilentRunResult> {
     let resolved = resolve_runtime(version)?;
     require_runtime(&resolved, version)?;
-
     let runtime_path = config::runtimes_dir()?.join(&resolved);
-    let new_path = build_runtime_path(&runtime_path, &resolved)?;
-    let composer_home = crate::version::composer_home_for(&resolved)?;
 
     let (program, args) = command
         .split_first()
         .context("run_silent requires a non-empty command")?;
     let program = resolve_program(&runtime_path, &resolved, program)?;
 
-    let output = Command::new(&program)
-        .args(args)
-        .env("PATH", &new_path)
-        .env("COMPOSER_HOME", composer_home.as_str())
-        .env("PHPVM_VERSION", &resolved)
-        .output()
-        .context("Failed to execute command")?;
+    let mut cmd = Command::new(&program);
+    cmd.args(args);
+    apply_runtime_env(&mut cmd, &runtime_path, &resolved)?;
+
+    let output = cmd.output().context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

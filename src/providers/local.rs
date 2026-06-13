@@ -1,9 +1,8 @@
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use super::Provider;
-use crate::manifest::ManifestEntry;
-use crate::profile::Profile;
+use crate::manifest::{Manifest, ManifestEntry};
 
 /// Provider that uses a locally-installed PHP runtime.
 ///
@@ -23,7 +22,10 @@ impl Provider for LocalProvider {
         &self,
         _entry: &ManifestEntry,
         _target: &Utf8PathBuf,
-        _profile: &Profile,
+        _profile_name: &str,
+        _project_dir: &Utf8Path,
+        _manifest: Option<&Manifest>,
+        _catalog: &[String],
     ) -> Result<()> {
         anyhow::bail!(
             "Local provider creates a symlink to host PHP. \

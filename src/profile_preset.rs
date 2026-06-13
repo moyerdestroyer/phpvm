@@ -1,0 +1,449 @@
+use std::collections::BTreeSet;
+use std::fs;
+
+use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+use serde::Serialize;
+
+use crate::config;
+use crate::manifest::Manifest;
+use crate::output;
+use crate::profile::ProfileTemplate;
+use crate::runtime_metadata;
+
+/// Where a resolved profile preset lives on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PresetSource {
+    Project,
+    Global,
+    Runtime,
+    Bundled,
+}
+
+impl PresetSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PresetSource::Project => "project",
+            PresetSource::Global => "global",
+            PresetSource::Runtime => "runtime",
+            PresetSource::Bundled => "bundled",
+        }
+    }
+}
+
+/// A resolved profile ini preset ready to activate.
+#[derive(Debug, Clone)]
+pub struct ResolvedPreset {
+    #[allow(dead_code)]
+    pub name: String,
+    pub path: Utf8PathBuf,
+    pub source: PresetSource,
+}
+
+/// Listed profile preset for `phpvm profile list`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListedPreset {
+    pub name: String,
+    pub path: String,
+    pub source: String,
+}
+
+const BUNDLED_WORDPRESS: &str = include_str!("../profiles/wordpress.ini");
+const BUNDLED_LARAVEL: &str = include_str!("../profiles/laravel.ini");
+const BUNDLED_MINIMAL: &str = include_str!("../profiles/minimal.ini");
+
+const BUILTIN_NAMES: &[&str] = &["wordpress", "laravel", "minimal"];
+
+/// Project-local preset directory: `<project>/.phpvm/profiles/`.
+pub fn project_profiles_dir(project_dir: &Utf8Path) -> Utf8PathBuf {
+    project_dir.join(".phpvm").join("profiles")
+}
+
+/// Global preset directory: `~/.phpvm/profiles/`.
+pub fn global_profiles_dir() -> Result<Utf8PathBuf> {
+    Ok(config::data_dir()?.join("profiles"))
+}
+
+fn preset_file_path(dir: &Utf8Path, name: &str) -> Utf8PathBuf {
+    dir.join(format!("{name}.ini"))
+}
+
+fn bundled_starter_content(name: &str) -> Option<&'static str> {
+    match name {
+        "wordpress" => Some(BUNDLED_WORDPRESS),
+        "laravel" => Some(BUNDLED_LARAVEL),
+        "minimal" => Some(BUNDLED_MINIMAL),
+        _ => None,
+    }
+}
+
+/// Return bundled starter content or generate from manifest template.
+pub fn starter_content(
+    name: &str,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+) -> Result<String> {
+    if let Some(content) = bundled_starter_content(name) {
+        return Ok(content.to_string());
+    }
+
+    if let Some(mf) = manifest {
+        if let Some(template) = mf.resolve_profile_template(name) {
+            return Ok(render_template_ini(&template, catalog));
+        }
+    }
+
+    anyhow::bail!(
+        "No profile preset '{}' found. Create one with `phpvm profile new {}` \
+         or add .phpvm/profiles/{}.ini",
+        name,
+        name,
+        name
+    )
+}
+
+fn render_template_ini(template: &ProfileTemplate, catalog: &[String]) -> String {
+    let mut lines = vec![
+        format!("; PHPVM profile preset: {}", template.name),
+        "; Generated from manifest template.".to_string(),
+        String::new(),
+    ];
+
+    let enabled: BTreeSet<&str> = template.extensions.iter().map(String::as_str).collect();
+    for ext in catalog {
+        if enabled.contains(ext.as_str()) {
+            lines.push(format!("extension={ext}"));
+        } else {
+            lines.push(format!(";extension={ext}"));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+/// Write starter content to `dest` only when the file does not exist.
+pub fn materialize_starter_if_missing(dest: &Utf8Path, content: &str) -> Result<bool> {
+    if dest.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent))?;
+    }
+    fs::write(dest, content).with_context(|| format!("Failed to write preset {}", dest))?;
+    Ok(true)
+}
+
+/// Resolve a preset by name following project → global → runtime → materialize order.
+pub fn resolve_preset(
+    name: &str,
+    project_dir: &Utf8Path,
+    runtime_dir: &Utf8Path,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+) -> Result<ResolvedPreset> {
+    let project_path = preset_file_path(&project_profiles_dir(project_dir), name);
+    if project_path.exists() {
+        return Ok(ResolvedPreset {
+            name: name.to_string(),
+            path: project_path,
+            source: PresetSource::Project,
+        });
+    }
+
+    let global_path = preset_file_path(&global_profiles_dir()?, name);
+    if global_path.exists() {
+        return Ok(ResolvedPreset {
+            name: name.to_string(),
+            path: global_path,
+            source: PresetSource::Global,
+        });
+    }
+
+    let runtime_path = runtime_metadata::profile_ini_path(runtime_dir, name);
+    if runtime_path.exists() {
+        return Ok(ResolvedPreset {
+            name: name.to_string(),
+            path: runtime_path,
+            source: PresetSource::Runtime,
+        });
+    }
+
+    let content = starter_content(name, manifest, catalog)?;
+    materialize_starter_if_missing(&global_path, &content)?;
+    Ok(ResolvedPreset {
+        name: name.to_string(),
+        path: global_path,
+        source: PresetSource::Bundled,
+    })
+}
+
+/// Copy a preset file to the runtime's active `etc/php.ini`.
+pub fn activate_preset(runtime_dir: &Utf8Path, preset_path: &Utf8Path) -> Result<()> {
+    let etc_dir = runtime_dir.join("etc");
+    fs::create_dir_all(&etc_dir)
+        .with_context(|| format!("Failed to create etc directory {}", etc_dir))?;
+
+    let active_ini = runtime_metadata::active_php_ini(runtime_dir);
+    let preset_contents = fs::read_to_string(preset_path)
+        .with_context(|| format!("Failed to read profile preset {}", preset_path))?;
+    fs::write(&active_ini, preset_contents)
+        .with_context(|| format!("Failed to write active php.ini {}", active_ini))?;
+    Ok(())
+}
+
+/// Parse enabled extension names from ini contents.
+pub fn parse_enabled_extensions(ini_contents: &str) -> Vec<String> {
+    let mut extensions = Vec::new();
+    for line in ini_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("extension=") {
+            let ext = rest.split_whitespace().next().unwrap_or(rest).trim();
+            if !ext.is_empty() && !extensions.iter().any(|e| e == ext) {
+                extensions.push(ext.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("zend_extension=") {
+            let ext = rest.split_whitespace().next().unwrap_or(rest).trim();
+            if !ext.is_empty() && !extensions.iter().any(|e| e == ext) {
+                extensions.push(ext.to_string());
+            }
+        }
+    }
+    extensions
+}
+
+/// Parse enabled extensions from a preset file on disk.
+pub fn parse_enabled_extensions_from_file(path: &Utf8Path) -> Result<Vec<String>> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("Failed to read preset {}", path))?;
+    Ok(parse_enabled_extensions(&contents))
+}
+
+/// Warn when a preset enables extensions not compiled into the runtime catalog.
+pub fn validate_preset_extensions(preset_path: &Utf8Path, catalog: &[String]) -> Result<()> {
+    if catalog.is_empty() {
+        return Ok(());
+    }
+
+    let enabled = parse_enabled_extensions_from_file(preset_path)?;
+    let catalog_set: BTreeSet<&str> = catalog.iter().map(String::as_str).collect();
+    let missing: Vec<&str> = enabled
+        .iter()
+        .filter_map(|ext| {
+            let base = ext.strip_suffix(".so").unwrap_or(ext.as_str());
+            if catalog_set.contains(base) || catalog_set.contains(ext.as_str()) {
+                None
+            } else {
+                Some(base)
+            }
+        })
+        .collect();
+
+    if !missing.is_empty() {
+        output::warn(&format!(
+            "Preset {} enables extensions not in this runtime: {}",
+            preset_path,
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Collect all known preset names from project, global, runtime, and builtins.
+pub fn discover_presets(
+    project_dir: &Utf8Path,
+    runtime_dir: Option<&Utf8Path>,
+) -> Result<Vec<ListedPreset>> {
+    let mut seen = BTreeSet::new();
+    let mut listed = Vec::new();
+
+    let mut add_dir = |dir: &Utf8Path, source: PresetSource| -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir.as_std_path())
+            .with_context(|| format!("Failed to read profile preset directory {}", dir))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ini") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if seen.insert(stem.to_string()) {
+                listed.push(ListedPreset {
+                    name: stem.to_string(),
+                    path: Utf8PathBuf::from_path_buf(path)
+                        .map_err(|p| anyhow::anyhow!("Invalid UTF-8 path: {:?}", p))?
+                        .to_string(),
+                    source: source.as_str().to_string(),
+                });
+            }
+        }
+        Ok(())
+    };
+
+    add_dir(&project_profiles_dir(project_dir), PresetSource::Project)?;
+    add_dir(&global_profiles_dir()?, PresetSource::Global)?;
+    if let Some(runtime_dir) = runtime_dir {
+        add_dir(
+            &runtime_metadata::profiles_ini_dir(runtime_dir),
+            PresetSource::Runtime,
+        )?;
+    }
+
+    for name in BUILTIN_NAMES {
+        if seen.insert((*name).to_string()) {
+            listed.push(ListedPreset {
+                name: (*name).to_string(),
+                path: format!("(bundled starter: {name}.ini)"),
+                source: PresetSource::Bundled.as_str().to_string(),
+            });
+        }
+    }
+
+    listed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(listed)
+}
+
+/// Create a new preset file in project or global directory.
+pub fn create_preset(
+    name: &str,
+    project_dir: &Utf8Path,
+    global: bool,
+    from_template: Option<&str>,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+) -> Result<Utf8PathBuf> {
+    let dir = if global {
+        global_profiles_dir()?
+    } else {
+        project_profiles_dir(project_dir)
+    };
+    let dest = preset_file_path(&dir, name);
+    if dest.exists() {
+        anyhow::bail!("Profile preset already exists: {}", dest);
+    }
+
+    let template_name = from_template.unwrap_or("minimal");
+    let content = starter_content(template_name, manifest, catalog)?;
+    let header = format!("; PHPVM profile preset: {name}");
+    let body = content
+        .lines()
+        .skip_while(|line| line.starts_with("; PHPVM profile preset:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let final_content = if body.is_empty() {
+        header
+    } else {
+        format!("{header}\n{body}")
+    };
+    materialize_starter_if_missing(&dest, &final_content)?;
+    Ok(dest)
+}
+
+/// Fork an existing preset into the project profiles directory.
+pub fn fork_preset(
+    src: &str,
+    dst: &str,
+    project_dir: &Utf8Path,
+    runtime_dir: Option<&Utf8Path>,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+) -> Result<Utf8PathBuf> {
+    let resolved = resolve_preset(
+        src,
+        project_dir,
+        runtime_dir.unwrap_or_else(|| Utf8Path::new("/nonexistent")),
+        manifest,
+        catalog,
+    )?;
+    let dest_path = preset_file_path(&project_profiles_dir(project_dir), dst);
+    if dest_path.exists() {
+        anyhow::bail!("Profile preset already exists: {}", dest_path);
+    }
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&resolved.path, &dest_path)
+        .with_context(|| format!("Failed to copy {} to {}", resolved.path, dest_path))?;
+    Ok(dest_path)
+}
+
+/// Open a preset in the user's editor.
+pub fn edit_preset(path: &Utf8Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let status = std::process::Command::new(&editor)
+        .arg(path.as_str())
+        .status()
+        .with_context(|| format!("Failed to launch editor '{editor}'"))?;
+
+    if !status.success() {
+        anyhow::bail!("Editor exited with status {}", status);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn utf8(dir: &TempDir) -> Utf8PathBuf {
+        Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap()
+    }
+
+    #[test]
+    fn parse_enabled_extensions_reads_extension_lines() {
+        let ini = r#"
+; comment
+extension=curl
+extension=mbstring
+;extension=gd
+zend_extension=xdebug
+"#;
+        let exts = parse_enabled_extensions(ini);
+        assert!(exts.contains(&"curl".to_string()));
+        assert!(exts.contains(&"mbstring".to_string()));
+        assert!(!exts.contains(&"gd".to_string()));
+        assert!(exts.contains(&"xdebug".to_string()));
+    }
+
+    #[test]
+    fn materialize_starter_if_missing_does_not_overwrite() -> Result<()> {
+        let dir = TempDir::new()?;
+        let path = dir.path().join("test.ini");
+        let utf8_path = Utf8PathBuf::from_path_buf(path.clone()).unwrap();
+        fs::write(&path, "original")?;
+        assert!(!materialize_starter_if_missing(&utf8_path, "new")?);
+        assert_eq!(fs::read_to_string(&path)?, "original");
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_preset_prefers_project_over_global() -> Result<()> {
+        let project = TempDir::new()?;
+        let project_dir = utf8(&project);
+        let profiles_dir = project_profiles_dir(&project_dir);
+        fs::create_dir_all(&profiles_dir)?;
+        let project_ini = profiles_dir.join("custom.ini");
+        fs::write(&project_ini, "; project")?;
+
+        let runtime = TempDir::new()?;
+        let runtime_dir = utf8(&runtime);
+
+        let resolved = resolve_preset("custom", &project_dir, &runtime_dir, None, &[])?;
+        assert_eq!(resolved.source, PresetSource::Project);
+        assert_eq!(resolved.path, project_ini);
+        Ok(())
+    }
+}

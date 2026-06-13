@@ -41,6 +41,9 @@ pub enum Command {
     Use {
         /// PHP version to activate (e.g. 8.3, 8.3.23). Must be installed.
         version: String,
+        /// Extension profile ini preset to activate for this runtime
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Print shell integration code.
@@ -96,6 +99,12 @@ pub enum Command {
         json: bool,
     },
 
+    /// Switch extension profile presets (ini configs) on installed runtimes
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+
     /// List installed PHP runtimes
     Ls,
 
@@ -110,6 +119,69 @@ pub enum Command {
 
     /// List installed PHP runtimes (deprecated; use `ls`)
     Versions,
+}
+
+#[derive(Subcommand)]
+pub enum ProfileCommand {
+    /// Activate a profile ini preset on an installed runtime
+    Use {
+        /// Profile name (wordpress, laravel, minimal, or custom)
+        name: String,
+        /// PHP version to switch (defaults to active runtime from `phpvm use`)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// List available profile presets
+    List {
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the resolved path to a profile preset file
+    Path {
+        /// Profile name (defaults to active profile)
+        name: Option<String>,
+        /// PHP version context for runtime-local presets
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Open a profile preset in $EDITOR (or $VISUAL)
+    Edit {
+        /// Profile name (defaults to active profile)
+        name: Option<String>,
+        /// PHP version context for runtime-local presets
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Create a new profile preset ini file
+    New {
+        /// Name for the new preset
+        name: String,
+        /// Template preset to copy from (default: minimal)
+        #[arg(long)]
+        from: Option<String>,
+        /// Write to ~/.phpvm/profiles/ instead of project .phpvm/profiles/
+        #[arg(long)]
+        global: bool,
+        /// PHP version context for extension catalog when seeding
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Copy an existing preset to a new name in the project profiles directory
+    Fork {
+        /// Source preset name
+        src: String,
+        /// Destination preset name
+        dst: String,
+        /// PHP version context for resolving the source preset
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 /// Parse a report format string into an OutputFormat.

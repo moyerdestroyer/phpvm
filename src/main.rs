@@ -6,14 +6,17 @@ mod manifest;
 mod matrix;
 mod output;
 mod profile;
+mod profile_preset;
 mod providers;
 mod runner;
+mod runtime_metadata;
 mod version;
 
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::Command;
+use crate::output::OutputFormat;
 
 fn main() -> Result<()> {
     let args = cli::Args::parse();
@@ -26,10 +29,43 @@ fn main() -> Result<()> {
         Command::Doctor { .. } => doctor::run_with_format(format)?,
         Command::ReleaseCheck { .. } => doctor::release_check_with_format(format)?,
         Command::Profiles { .. } => profile::list_profiles(format)?,
+        Command::Profile { command } => match command {
+            cli::ProfileCommand::Use { name, version } => {
+                profile::use_profile(&name, version.as_deref())?
+            }
+            cli::ProfileCommand::List { json } => {
+                let list_format = if json {
+                    OutputFormat::Json
+                } else {
+                    OutputFormat::Human
+                };
+                profile::list_profiles(list_format)?
+            }
+            cli::ProfileCommand::Path { name, version } => {
+                profile::preset_path(name.as_deref(), version.as_deref())?
+            }
+            cli::ProfileCommand::Edit { name, version } => {
+                profile::edit_preset(name.as_deref(), version.as_deref())?
+            }
+            cli::ProfileCommand::New {
+                name,
+                from,
+                global,
+                version,
+            } => profile::new_preset(&name, global, from.as_deref(), version.as_deref())?,
+            cli::ProfileCommand::Fork { src, dst, version } => {
+                profile::fork_preset(&src, &dst, version.as_deref())?
+            }
+        },
         Command::Ls | Command::Versions => version::list_installed()?,
         Command::LsRemote => version::list_remote()?,
         Command::Info { version } => version::show_info(&version)?,
-        Command::Use { version } => version::activate(&version)?,
+        Command::Use { version, profile } => {
+            version::activate(&version)?;
+            if let Some(profile_name) = profile {
+                profile::use_profile(&profile_name, Some(&version))?;
+            }
+        }
         Command::Env { version } => version::print_env(version.as_deref())?,
         Command::Current => version::show_current()?,
     }

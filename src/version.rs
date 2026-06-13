@@ -1,7 +1,6 @@
 use std::fmt;
 
 use anyhow::{bail, Result};
-use serde::Deserialize;
 
 use crate::config;
 use crate::manifest;
@@ -228,8 +227,8 @@ pub fn resolve_specifier(specifier: &str, available: &[String]) -> Result<String
 
 /// List all installed PHP runtimes.
 ///
-/// The currently "active" runtime (resolved from project config's php_constraint,
-/// or the highest installed version if no constraint) is marked with a leading `*`.
+/// The currently "active" runtime (from `PHPVM_VERSION` or the persisted `phpvm use`
+/// value) is marked with a leading `*`.
 pub fn list_installed() -> Result<()> {
     let raw = runner::installed_versions()?;
     let mut versions: Vec<PhpVersion> = raw
@@ -267,6 +266,7 @@ fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> 
     let bin_dir = runtime_path.join("bin");
     let composer_home = composer_home_for(resolved).expect("valid resolved version");
     let global_bin = composer_home.join("vendor").join("bin");
+    let php_ini = crate::runtime_metadata::active_php_ini(runtime_path);
 
     let separator = if cfg!(windows) { ";" } else { ":" };
     let path_value = format!(
@@ -274,12 +274,18 @@ fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> 
         bin_dir, separator, global_bin, separator, "$PATH"
     );
 
+    let phprc_export = if php_ini.exists() {
+        format!("export PHPRC=\"{}\"\n", php_ini)
+    } else {
+        String::new()
+    };
+
     format!(
         r#"export PHPVM_VERSION="{}"
 export COMPOSER_HOME="{}"
 export PATH="{}"
-"#,
-        resolved, composer_home, path_value
+{}"#,
+        resolved, composer_home, path_value, phprc_export
     )
 }
 
@@ -511,19 +517,17 @@ pub fn show_info(spec: &str) -> Result<()> {
         resolve_specifier(spec, &mf.available_versions())?
     };
 
-    if let Some(metadata) = read_installed_metadata(&resolved) {
+    if let Some(metadata) = crate::runtime_metadata::RuntimeMetadata::read(&resolved)? {
         println!("{:<12}{}", "PHP:", metadata.php);
         println!("{:<12}{}", "Composer:", metadata.composer);
-        println!("{:<12}{}", "Profile:", metadata.profile);
-        if let Some(manifest_profile) = metadata.manifest_profile {
-            if manifest_profile != metadata.profile {
-                println!("{:<12}{}", "Artifact:", manifest_profile);
-            }
+        println!("{:<12}{}", "Profile:", metadata.active_profile);
+        if let Some(source) = &metadata.preset_source {
+            println!("{:<12}{}", "Preset:", source);
         }
-        if !metadata.extensions.is_empty() {
+        if !metadata.enabled_extensions.is_empty() {
             println!();
             println!("Extensions:");
-            for ext in &metadata.extensions {
+            for ext in &metadata.enabled_extensions {
                 println!("  {}", ext);
             }
         }
@@ -540,18 +544,23 @@ pub fn show_info(spec: &str) -> Result<()> {
     };
 
     if let Some(e) = entry {
-        let exts = profile::builtin(&e.profile)
-            .map(|p| p.extensions)
-            .unwrap_or_default();
+        let project_dir = config::current_project_dir()?;
+        let cfg = config::load_config(&project_dir)?;
+        let default_profile = cfg.profile.as_deref().unwrap_or("minimal");
 
         println!("{:<12}{}", "PHP:", e.php);
         println!("{:<12}{}", "Composer:", e.composer);
-        println!("{:<12}{}", "Profile:", e.profile);
-        if !exts.is_empty() {
-            println!();
-            println!("Extensions:");
-            for ext in &exts {
-                println!("  {}", ext);
+        println!("{:<12}{}", "Profile:", default_profile);
+
+        if let Ok(enabled) =
+            profile::enabled_extensions_for_preset(default_profile, &project_dir, None)
+        {
+            if !enabled.is_empty() {
+                println!();
+                println!("Extensions:");
+                for ext in &enabled {
+                    println!("  {}", ext);
+                }
             }
         }
     } else {
@@ -610,34 +619,12 @@ fn filter_matching(available: &[String], major: u32, minor: u32) -> Vec<PhpVersi
         .collect()
 }
 
-#[derive(Deserialize)]
-struct InstalledRuntimeMetadata {
-    php: String,
-    composer: String,
-    profile: String,
-    #[serde(default)]
-    extensions: Vec<String>,
-    #[serde(default)]
-    manifest_profile: Option<String>,
-}
-
-fn read_installed_metadata(resolved: &str) -> Option<InstalledRuntimeMetadata> {
-    let metadata_path = config::runtimes_dir()
-        .ok()?
-        .join(resolved)
-        .join("metadata.json");
-    let contents = std::fs::read_to_string(metadata_path).ok()?;
-    serde_json::from_str(&contents).ok()
-}
-
 /// Determine which installed version should be considered "current" for display in `ls`.
 ///
+/// Matches `show_current`: only explicit activation via `phpvm use` counts.
 /// Resolution order (highest priority first):
 /// 1. The PHPVM_VERSION environment variable (set by `eval "$(phpvm use X)"`).
-///    This lets `phpvm ls` show the actively "used" runtime in the current shell.
-/// 2. If the project/global config specifies `php_constraint`, resolve it against the
-///    installed list (picks best matching installed version).
-/// 3. Otherwise, pick the highest (latest) installed version.
+/// 2. The persisted value written by `phpvm use` in any previous session.
 fn compute_current_version(installed: &[String]) -> Option<String> {
     if installed.is_empty() {
         return None;
@@ -645,36 +632,19 @@ fn compute_current_version(installed: &[String]) -> Option<String> {
 
     // Highest priority: explicit activation via `phpvm use` in *this* shell (env var set by eval).
     if let Ok(active) = std::env::var("PHPVM_VERSION") {
-        if installed.iter().any(|v| v == &active) {
+        if !active.is_empty() && installed.iter().any(|v| v == &active) {
             return Some(active);
         }
     }
 
     // Next: the persisted value written by `phpvm use` in any previous session.
-    // This makes the last `use`d version active in new terminals.
     if let Some(active) = config::get_current_version() {
         if installed.iter().any(|v| v == &active) {
             return Some(active);
         }
     }
 
-    // Then: project/global config php_constraint.
-    if let Ok(project_dir) = config::current_project_dir() {
-        if let Ok(cfg) = config::load_config(&project_dir) {
-            if let Some(constr) = &cfg.php_constraint {
-                if let Ok(res) = resolve_specifier(constr, installed) {
-                    return Some(res);
-                }
-            }
-        }
-    }
-    // Fallback: highest installed version (for display purposes).
-    let mut parsed: Vec<PhpVersion> = installed
-        .iter()
-        .filter_map(|s| PhpVersion::parse(s).ok())
-        .collect();
-    parsed.sort();
-    parsed.last().map(|v| v.to_string())
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1041,38 @@ mod tests {
         };
         let v2 = v1; // Copy
         assert_eq!(v1, v2);
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_current_version
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_current_version_honors_phpvm_version_env() {
+        let installed = vers(&["8.3.12", "8.2.27"]);
+        let saved = std::env::var("PHPVM_VERSION").ok();
+        std::env::set_var("PHPVM_VERSION", "8.3.12");
+        assert_eq!(
+            compute_current_version(&installed),
+            Some("8.3.12".to_string())
+        );
+        match saved {
+            Some(v) => std::env::set_var("PHPVM_VERSION", v),
+            None => std::env::remove_var("PHPVM_VERSION"),
+        }
+    }
+
+    #[test]
+    fn compute_current_version_ignores_uninstalled_env_version() {
+        let installed = vers(&["8.3.12"]);
+        let saved_env = std::env::var("PHPVM_VERSION").ok();
+        std::env::set_var("PHPVM_VERSION", "7.4.33");
+        let result = compute_current_version(&installed);
+        assert_ne!(result.as_deref(), Some("7.4.33"));
+        match saved_env {
+            Some(v) => std::env::set_var("PHPVM_VERSION", v),
+            None => std::env::remove_var("PHPVM_VERSION"),
+        }
     }
 
     // -----------------------------------------------------------------------

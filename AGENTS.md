@@ -33,7 +33,8 @@ PHPVM is a single-crate CLI. Modules live in `src/` and are organized by domain:
 | `manifest` | Remote manifest fetching and parsing |
 | `matrix` | Multi-runtime command execution |
 | `output` | Terminal output formatting and styling |
-| `profile` | Extension profiles (built-in and custom) |
+| `profile` | Profile preset commands and manifest template seeding |
+| `profile_preset` | Ini preset resolution, materialization, and activation |
 | `runner` | Single-runtime command execution |
 | `version` | PHP version resolution and listing |
 | `providers/` | Runtime installation backends (static_php, docker, local) |
@@ -65,23 +66,40 @@ Providers implement a common interface. The rest of the application should not k
 
 ### Profiles
 
-PHPVM ships with three built-in extension profiles:
+Profiles are **named `.ini` preset files** — full php.ini configs (extensions, memory limits, opcache, xdebug, etc.). One full binary is installed per PHP version; switching profiles copies a preset to the active `etc/php.ini`.
 
-- **wordpress** — curl, dom, gd, intl, mbstring, mysqli, openssl, pdo_mysql, xml, zip
-- **laravel** — curl, intl, mbstring, openssl, pdo_mysql, tokenizer, xml, zip
-- **minimal** — no extensions (base PHP)
+**Resolution order** (first match wins):
 
-Users can define custom profiles in `.phpvm.toml`:
+1. `<project>/.phpvm/profiles/<name>.ini`
+2. `~/.phpvm/profiles/<name>.ini`
+3. `~/.phpvm/runtimes/<version>/etc/profiles/<name>.ini`
+4. Bundled starter (materialized to global **only if missing**)
+
+Built-in starters: **wordpress**, **laravel**, **minimal** (shipped in `profiles/`; manifest templates are a fallback when no bundled file exists).
 
 ```toml
-profile = "drupal"
-
-[[profiles]]
-name = "drupal"
-extensions = ["curl", "dom", "gd", "mbstring", "mysql", "pdo_mysql", "xml", "zip"]
+# .phpvm.toml — default preset name only
+profile = "wordpress"
 ```
 
-Built-in profiles take priority over custom profiles with the same name. The `phpvm profiles` command lists all available profiles. The `phpvm install --profile=drupal 8.3` flag selects a profile at install time.
+```text
+# Project presets (commit these)
+my-app/.phpvm/profiles/wordpress.ini
+my-app/.phpvm/profiles/debug.ini
+```
+
+Commands:
+
+- `phpvm install 8.3 --profile=wordpress` — download once, activate initial preset
+- `phpvm profile use laravel` — switch active runtime's ini preset
+- `phpvm profile list` / `phpvm profiles` — list presets and source paths
+- `phpvm profile path [name]` — print resolved preset path (for editors/CI)
+- `phpvm profile edit [name]` — open preset in `$EDITOR`
+- `phpvm profile new <name> [--from <template>] [--global]`
+- `phpvm profile fork <src> <dst>`
+- `phpvm use 8.3 --profile=laravel` — version activation + profile in one step
+
+phpvm **never overwrites** an existing project/global/runtime preset file.
 
 ### Manifest Contract
 
@@ -89,11 +107,14 @@ The remote manifest is the source of truth.
 
 The manifest controls:
 
-- Available PHP versions
+- Available PHP versions (one full binary per version)
+- Extension catalog compiled into each binary
+- Named profile templates for starter ini seeding (authoritative config is `.ini` files)
 - Composer versions
-- Extension profiles
 - Download URLs
 - Checksums
+
+See `docs/manifest-v2.md` for the publishing contract.
 
 The CLI should never hardcode runtime download URLs. Changes to distribution infrastructure should be possible without releasing a new CLI version.
 
@@ -242,7 +263,9 @@ src/
 ├── manifest.rs      # Remote manifest handling
 ├── matrix.rs        # Multi-runtime execution
 ├── output.rs        # Terminal output formatting
-├── profile.rs       # Extension profiles (built-in and custom)
+├── profile.rs       # Profile preset CLI and manifest templates
+├── profile_preset.rs # Ini preset resolution and activation
+├── runtime_metadata.rs # Installed runtime metadata + ini paths
 ├── runner.rs        # Single-runtime command execution
 ├── version.rs       # Version resolution and listing
 └── providers/

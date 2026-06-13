@@ -113,6 +113,8 @@ pub struct DoctorResult {
     pub project_type: Option<String>,
     pub php_constraint: Option<String>,
     pub profile: Option<String>,
+    pub required_extensions: Vec<String>,
+    pub missing_extensions: Vec<String>,
     pub recommended_matrix: Vec<String>,
 }
 
@@ -201,6 +203,26 @@ pub fn print_doctor_result(result: &DoctorResult, format: OutputFormat) {
             match &result.profile {
                 Some(p) => info(&format!("Profile: {}", p)),
                 None => info("Profile: not specified"),
+            }
+
+            if !result.required_extensions.is_empty() {
+                info(&format!(
+                    "Required extensions: {}",
+                    result.required_extensions.join(", ")
+                ));
+            }
+
+            if !result.missing_extensions.is_empty() {
+                warn(&format!(
+                    "Missing from active profile: {}",
+                    result.missing_extensions.join(", ")
+                ));
+                if let Some(profile_name) = &result.profile {
+                    info(&format!(
+                        "Try: phpvm profile use {} or phpvm profile edit {}",
+                        profile_name, profile_name
+                    ));
+                }
             }
 
             if !result.recommended_matrix.is_empty() {

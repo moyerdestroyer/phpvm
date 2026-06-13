@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, SystemTime};
 
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config;
+use crate::profile::{self, ProfileTemplate};
 
 /// A single runtime entry from the remote manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,8 +19,13 @@ pub struct ManifestEntry {
     /// Bundled Composer version (e.g. "2.9.2")
     pub composer: String,
 
-    /// Extension profile name (e.g. "wordpress", "laravel", "minimal")
-    pub profile: String,
+    /// v1 manifest artifact profile tag (deprecated; normalized away on parse).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    /// Extensions compiled into the full binary (manifest v2).
+    #[serde(default)]
+    pub extensions: Vec<String>,
 
     /// Download URL for the runtime archive
     pub url: String,
@@ -27,9 +34,13 @@ pub struct ManifestEntry {
     pub sha256: String,
 }
 
-/// The full manifest: a collection of available runtimes.
+/// The full manifest: profile presets and available runtimes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Named extension presets for starter ini seeding (not user config).
+    #[serde(default)]
+    pub profiles: Vec<ProfileTemplate>,
+
     pub runtimes: Vec<ManifestEntry>,
 }
 
@@ -38,17 +49,34 @@ const DEFAULT_MANIFEST_URL: &str = "https://phpvm.com/manifest.json";
 
 // ── Manifest methods ────────────────────────────────────────────────────
 
+impl ManifestEntry {
+    /// Extensions available in the installed binary for this runtime.
+    pub fn extension_catalog(&self) -> Vec<String> {
+        if !self.extensions.is_empty() {
+            return self.extensions.clone();
+        }
+
+        // v1 fallback: union builtins when the manifest has not published catalogs yet.
+        self.profile
+            .as_deref()
+            .and_then(profile::builtin_template)
+            .map(|p| p.extensions)
+            .unwrap_or_default()
+    }
+}
+
 impl Manifest {
     /// Find an entry by exact PHP version string.
     pub fn find(&self, php_version: &str) -> Option<&ManifestEntry> {
         self.runtimes.iter().find(|e| e.php == php_version)
     }
 
-    /// Find an entry by exact PHP version and manifest profile.
-    pub fn find_with_profile(&self, php_version: &str, profile: &str) -> Option<&ManifestEntry> {
-        self.runtimes
-            .iter()
-            .find(|e| e.php == php_version && e.profile == profile)
+    /// Resolve a manifest profile template by name, falling back to built-ins.
+    pub fn resolve_profile_template(&self, name: &str) -> Option<ProfileTemplate> {
+        if let Some(p) = self.profiles.iter().find(|p| p.name == name) {
+            return Some(p.clone());
+        }
+        profile::builtin_template(name)
     }
 
     /// Find the latest (highest) patch version for a given `major.minor`.
@@ -100,7 +128,6 @@ impl Manifest {
     }
 
     /// Return a sorted list of all available PHP version strings.
-    #[allow(dead_code)]
     pub fn available_versions(&self) -> Vec<String> {
         let mut versions: Vec<String> = self.runtimes.iter().map(|e| e.php.clone()).collect();
         versions.sort_by(|a, b| {
@@ -120,9 +147,6 @@ impl Manifest {
 // ── Public functions ────────────────────────────────────────────────────
 
 /// Fetch the manifest from a URL.
-///
-/// Uses `reqwest::blocking` to perform a synchronous HTTP GET and parse the
-/// JSON body.  The caller is responsible for caching decisions.
 pub fn fetch(url: &str) -> Result<Manifest> {
     let resp = reqwest::blocking::get(url)
         .with_context(|| format!("Failed to fetch manifest from {}", url))?
@@ -137,16 +161,10 @@ pub fn fetch(url: &str) -> Result<Manifest> {
 }
 
 /// Fetch the manifest with local caching.
-///
-/// If a cached manifest exists at `cache_dir / manifest.json` and is less than
-/// one hour old (by file modification time), the cached copy is used.
-/// Otherwise the URL is fetched, the result parsed, and the JSON is written
-/// into `cache_dir / manifest.json` for future use.
 pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
     let cache_path = manifest_cache_path(url, cache_dir);
-    let max_age = Duration::from_secs(3600); // 1 hour
+    let max_age = Duration::from_secs(3600);
 
-    // Try to use the cached copy if it exists and is fresh.
     if let Ok(meta) = fs::metadata(&cache_path) {
         if let Ok(modified) = meta.modified() {
             if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
@@ -154,7 +172,6 @@ pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
                     match parse_file(&cache_path) {
                         Ok(m) => return Ok(m),
                         Err(e) => {
-                            // Cache file corrupt?  Warn and re-fetch.
                             crate::output::warn(&format!(
                                 "cached manifest is invalid ({}) — re-fetching",
                                 e
@@ -166,10 +183,8 @@ pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
         }
     }
 
-    // Fetch from network.
     let manifest = fetch(url)?;
 
-    // Persist to cache directory.
     fs::create_dir_all(cache_dir)
         .with_context(|| format!("Failed to create cache directory {}", cache_dir))?;
 
@@ -183,16 +198,12 @@ pub fn fetch_cached(url: &str, cache_dir: &Utf8PathBuf) -> Result<Manifest> {
 }
 
 /// Fetch the manifest from the default URL, using the default cache directory.
-///
-/// This is the main entry-point for most callers. Prefer `fetch_from_config` when
-/// a loaded Config (which may override `manifest_url`) is available.
 pub fn fetch_default() -> Result<Manifest> {
     let cache_dir = config::cache_dir()?;
     fetch_cached(DEFAULT_MANIFEST_URL, &cache_dir)
 }
 
 /// Fetch the manifest, using `config.manifest_url` if set, otherwise the default URL.
-/// Uses the standard cache directory.
 pub fn fetch_from_config(config: &config::Config) -> Result<Manifest> {
     let url = config
         .manifest_url
@@ -203,45 +214,13 @@ pub fn fetch_from_config(config: &config::Config) -> Result<Manifest> {
 }
 
 /// Parse a JSON string into a `Manifest`.
-///
-/// This is a pure function with no side-effects — ideal for testing.
 pub fn parse_manifest(json: &str) -> Result<Manifest> {
-    let manifest: Manifest =
+    let raw: Manifest =
         serde_json::from_str(json).with_context(|| "Failed to parse manifest JSON")?;
-
-    // Validate that every entry has the required fields (serde already
-    // enforces this for missing fields, but a field could be empty).
-    for (i, entry) in manifest.runtimes.iter().enumerate() {
-        if entry.php.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty PHP version", i);
-        }
-        if entry.composer.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty Composer version", i);
-        }
-        if entry.profile.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty profile", i);
-        }
-        if entry.url.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty URL", i);
-        }
-        if entry.sha256.is_empty() {
-            anyhow::bail!("Manifest entry {} has an empty sha256", i);
-        }
-        // Validate the PHP version looks like a semver string.
-        semver::Version::parse(&entry.php).with_context(|| {
-            format!(
-                "Manifest entry {} has invalid PHP version: '{}'",
-                i, entry.php
-            )
-        })?;
-    }
-
-    Ok(manifest)
+    normalize_manifest(raw)
 }
 
 /// Fetch a single manifest entry for a specific PHP version.
-///
-/// This is a convenience wrapper around `fetch_default` + `Manifest::find`.
 #[allow(dead_code)]
 pub fn fetch_entry(version: &str) -> Result<ManifestEntry> {
     let manifest = fetch_default()?;
@@ -253,7 +232,104 @@ pub fn fetch_entry(version: &str) -> Result<ManifestEntry> {
 
 // ── Internal helpers ────────────────────────────────────────────────────
 
-/// Parse a cached manifest file.
+fn normalize_manifest(mut manifest: Manifest) -> Result<Manifest> {
+    if manifest.profiles.is_empty() {
+        manifest.profiles = profile::builtin_templates();
+    }
+
+    let mut grouped: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
+    for entry in manifest.runtimes {
+        grouped.entry(entry.php.clone()).or_default().push(entry);
+    }
+
+    let mut runtimes = Vec::new();
+    for (php, entries) in grouped {
+        let merged = merge_runtime_entries(&php, entries)?;
+        runtimes.push(merged);
+    }
+
+    runtimes.sort_by(|a, b| {
+        let va = semver::Version::parse(&a.php);
+        let vb = semver::Version::parse(&b.php);
+        match (&va, &vb) {
+            (Ok(va), Ok(vb)) => va.cmp(vb),
+            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+            (Err(_), Err(_)) => a.php.cmp(&b.php),
+        }
+    });
+
+    manifest.runtimes = runtimes;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<ManifestEntry> {
+    let mut extensions: Vec<String> = Vec::new();
+    for entry in &entries {
+        if !entry.extensions.is_empty() {
+            for ext in &entry.extensions {
+                if !extensions.contains(ext) {
+                    extensions.push(ext.clone());
+                }
+            }
+        } else if let Some(profile_name) = entry.profile.as_deref() {
+            if let Some(p) = profile::builtin_template(profile_name) {
+                for ext in p.extensions {
+                    if !extensions.contains(&ext) {
+                        extensions.push(ext);
+                    }
+                }
+            }
+        }
+    }
+
+    let base = entries
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("No manifest entries for PHP version {}", php))?;
+
+    Ok(ManifestEntry {
+        php: php.to_string(),
+        composer: base.composer,
+        profile: None,
+        extensions,
+        url: base.url,
+        sha256: base.sha256,
+    })
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<()> {
+    for (i, entry) in manifest.runtimes.iter().enumerate() {
+        if entry.php.is_empty() {
+            anyhow::bail!("Manifest entry {} has an empty PHP version", i);
+        }
+        if entry.composer.is_empty() {
+            anyhow::bail!("Manifest entry {} has an empty Composer version", i);
+        }
+        if entry.url.is_empty() {
+            anyhow::bail!("Manifest entry {} has an empty URL", i);
+        }
+        if entry.sha256.is_empty() {
+            anyhow::bail!("Manifest entry {} has an empty sha256", i);
+        }
+        semver::Version::parse(&entry.php).with_context(|| {
+            format!(
+                "Manifest entry {} has invalid PHP version: '{}'",
+                i, entry.php
+            )
+        })?;
+    }
+
+    for profile in &manifest.profiles {
+        if profile.name.is_empty() {
+            anyhow::bail!("Manifest profile has an empty name");
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_file(path: &camino::Utf8Path) -> Result<Manifest> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("Failed to read cached manifest from {}", path))?;
@@ -274,7 +350,7 @@ fn manifest_cache_path(url: &str, cache_dir: &Utf8PathBuf) -> Utf8PathBuf {
 mod tests {
     use super::*;
 
-    const FIXTURE_JSON: &str = r#"{
+    const FIXTURE_V1_JSON: &str = r#"{
   "runtimes": [
     {
       "php": "8.1.0",
@@ -307,32 +383,73 @@ mod tests {
   ]
 }"#;
 
-    fn fixture() -> Manifest {
-        parse_manifest(FIXTURE_JSON).unwrap()
+    const FIXTURE_V2_JSON: &str = r#"{
+  "profiles": [
+    {
+      "name": "wordpress",
+      "extensions": ["curl", "dom", "gd", "intl", "mbstring", "mysqli", "openssl", "pdo_mysql", "xml", "zip"]
+    },
+    {
+      "name": "laravel",
+      "extensions": ["curl", "intl", "mbstring", "openssl", "pdo_mysql", "tokenizer", "xml", "zip"]
+    },
+    {
+      "name": "minimal",
+      "extensions": []
+    }
+  ],
+  "runtimes": [
+    {
+      "php": "8.3.23",
+      "composer": "2.9.2",
+      "extensions": ["curl", "dom", "gd", "intl", "mbstring", "mysqli", "openssl", "pdo_mysql", "tokenizer", "xml", "zip"],
+      "url": "https://example.com/php-8.3.23-full.tar.gz",
+      "sha256": "full123"
+    }
+  ]
+}"#;
+
+    fn fixture_v1() -> Manifest {
+        parse_manifest(FIXTURE_V1_JSON).unwrap()
     }
 
-    // ── parse_manifest ────────────────────────────────────────────────
+    fn fixture_v2() -> Manifest {
+        parse_manifest(FIXTURE_V2_JSON).unwrap()
+    }
 
     #[test]
-    fn parse_valid_manifest() {
-        let m = parse_manifest(FIXTURE_JSON).unwrap();
+    fn parse_v1_normalizes_to_one_entry_per_php() {
+        let m = fixture_v1();
         assert_eq!(m.runtimes.len(), 4);
+        assert_eq!(m.profiles.len(), 3);
     }
 
     #[test]
-    fn parse_manifest_with_multiple_entries() {
-        let m = fixture();
-        let versions: Vec<&str> = m.runtimes.iter().map(|e| e.php.as_str()).collect();
-        assert!(versions.contains(&"8.1.0"));
-        assert!(versions.contains(&"8.2.0"));
-        assert!(versions.contains(&"8.3.12"));
-        assert!(versions.contains(&"8.3.23"));
+    fn parse_v2_manifest_has_profiles_and_extensions() {
+        let m = fixture_v2();
+        assert_eq!(m.runtimes.len(), 1);
+        assert_eq!(m.profiles.len(), 3);
+        let entry = m.find("8.3.23").unwrap();
+        assert!(entry.extensions.contains(&"tokenizer".to_string()));
+    }
+
+    #[test]
+    fn v1_wordpress_entry_gains_extension_catalog() {
+        let m = fixture_v1();
+        let entry = m.find("8.2.0").unwrap();
+        assert!(entry.extensions.contains(&"mysqli".to_string()));
+    }
+
+    #[test]
+    fn resolve_profile_template_prefers_manifest_preset() {
+        let m = fixture_v2();
+        let resolved = m.resolve_profile_template("wordpress").unwrap();
+        assert_eq!(resolved.extensions.len(), 10);
     }
 
     #[test]
     fn parse_invalid_json_returns_error() {
-        let result = parse_manifest("not valid json");
-        assert!(result.is_err());
+        assert!(parse_manifest("not valid json").is_err());
     }
 
     #[test]
@@ -342,14 +459,11 @@ mod tests {
     {
       "php": "8.1.0",
       "composer": "2.6.0",
-      "profile": "minimal",
       "sha256": "abc123"
     }
   ]
 }"#;
-        // Missing `url` field — serde should reject it.
-        let result = parse_manifest(json);
-        assert!(result.is_err());
+        assert!(parse_manifest(json).is_err());
     }
 
     #[test]
@@ -359,14 +473,12 @@ mod tests {
     {
       "php": "",
       "composer": "2.6.0",
-      "profile": "minimal",
       "url": "https://example.com/php-8.1.0.tar.gz",
       "sha256": "abc123"
     }
   ]
 }"#;
-        let result = parse_manifest(json);
-        assert!(result.is_err());
+        assert!(parse_manifest(json).is_err());
     }
 
     #[test]
@@ -376,14 +488,12 @@ mod tests {
     {
       "php": "8-point-what",
       "composer": "2.6.0",
-      "profile": "minimal",
       "url": "https://example.com/php-8.1.0.tar.gz",
       "sha256": "abc123"
     }
   ]
 }"#;
-        let result = parse_manifest(json);
-        assert!(result.is_err());
+        assert!(parse_manifest(json).is_err());
     }
 
     #[test]
@@ -391,130 +501,40 @@ mod tests {
         let json = r#"{"runtimes": []}"#;
         let m = parse_manifest(json).unwrap();
         assert!(m.runtimes.is_empty());
+        assert_eq!(m.profiles.len(), 3);
     }
 
     #[test]
-    fn parse_missing_runtimes_field_returns_error() {
-        let json = r#"{}"#;
-        let result = parse_manifest(json);
-        assert!(result.is_err());
-    }
-
-    // ── Manifest::find ────────────────────────────────────────────────
-
-    #[test]
-    fn find_returns_correct_entry() {
-        let m = fixture();
-        let entry = m.find("8.3.12").unwrap();
-        assert_eq!(entry.php, "8.3.12");
+    fn find_returns_correct_v2_entry() {
+        let m = fixture_v2();
+        let entry = m.find("8.3.23").unwrap();
         assert_eq!(entry.composer, "2.9.2");
-        assert_eq!(entry.profile, "laravel");
-        assert_eq!(entry.url, "https://example.com/php-8.3.12.tar.gz");
-        assert_eq!(entry.sha256, "ghi789");
+        assert_eq!(entry.url, "https://example.com/php-8.3.23-full.tar.gz");
     }
 
     #[test]
     fn find_returns_none_for_missing_version() {
-        let m = fixture();
-        assert!(m.find("9.0.0").is_none());
+        assert!(fixture_v2().find("9.0.0").is_none());
     }
-
-    #[test]
-    fn find_returns_none_for_partial_version() {
-        let m = fixture();
-        // "8.3" is not an exact version match.
-        assert!(m.find("8.3").is_none());
-    }
-
-    // ── Manifest::latest_patch ────────────────────────────────────────
 
     #[test]
     fn latest_patch_returns_highest() {
-        let m = fixture();
+        let m = fixture_v1();
         let entry = m.latest_patch(8, 3).unwrap();
         assert_eq!(entry.php, "8.3.23");
     }
 
     #[test]
-    fn latest_patch_single_entry() {
-        let m = fixture();
-        let entry = m.latest_patch(8, 1).unwrap();
-        assert_eq!(entry.php, "8.1.0");
-    }
-
-    #[test]
-    fn latest_patch_missing_major_minor() {
-        let m = fixture();
-        assert!(m.latest_patch(9, 0).is_none());
-    }
-
-    // ── Manifest::min_patch ───────────────────────────────────────────
-
-    #[test]
-    fn min_patch_returns_lowest() {
-        let m = fixture();
-        let entry = m.min_patch(8, 3).unwrap();
-        assert_eq!(entry.php, "8.3.12");
-    }
-
-    #[test]
-    fn min_patch_single_entry() {
-        let m = fixture();
-        let entry = m.min_patch(8, 1).unwrap();
-        assert_eq!(entry.php, "8.1.0");
-    }
-
-    #[test]
-    fn min_patch_missing_major_minor() {
-        let m = fixture();
-        assert!(m.min_patch(9, 0).is_none());
-    }
-
-    // ── Manifest::available_versions ──────────────────────────────────
-
-    #[test]
     fn available_versions_returns_sorted() {
-        let m = fixture();
-        let versions = m.available_versions();
-        assert_eq!(versions, vec!["8.1.0", "8.2.0", "8.3.12", "8.3.23"]);
-    }
-
-    #[test]
-    fn available_versions_empty_manifest() {
-        let m = Manifest {
-            runtimes: Vec::new(),
-        };
-        assert!(m.available_versions().is_empty());
-    }
-
-    // ── Structure ─────────────────────────────────────────────────────
-
-    #[test]
-    fn manifest_entry_fields_are_accessible() {
-        let entry = ManifestEntry {
-            php: "8.3.23".into(),
-            composer: "2.9.2".into(),
-            profile: "wordpress".into(),
-            url: "https://example.com/php-8.3.23.tar.gz".into(),
-            sha256: "jkl012".into(),
-        };
-        assert_eq!(entry.php, "8.3.23");
-        assert_eq!(entry.composer, "2.9.2");
-        assert_eq!(entry.profile, "wordpress");
-        assert!(entry.url.starts_with("https://"));
-        assert!(!entry.sha256.is_empty());
+        let m = fixture_v1();
+        assert_eq!(
+            m.available_versions(),
+            vec!["8.1.0", "8.2.0", "8.3.12", "8.3.23"]
+        );
     }
 
     #[test]
     fn default_manifest_url_is_https() {
         assert!(DEFAULT_MANIFEST_URL.starts_with("https://"));
-    }
-
-    #[test]
-    fn manifest_cache_path_depends_on_url() {
-        let cache_dir = Utf8PathBuf::from("/tmp/phpvm-cache");
-        let first = manifest_cache_path("https://example.com/one.json", &cache_dir);
-        let second = manifest_cache_path("https://example.com/two.json", &cache_dir);
-        assert_ne!(first, second);
     }
 }

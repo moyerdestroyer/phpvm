@@ -42,9 +42,15 @@ Supported formats:
 
 ### Profiles
 
+Profiles are named `.ini` preset files (full php.ini configs). One full binary is installed per PHP version; `phpvm profile use <name>` copies a preset to the active `etc/php.ini`.
+
+Preset locations (resolution order): `.phpvm/profiles/`, `~/.phpvm/profiles/`, runtime `etc/profiles/`, then bundled starters.
+
+Use `phpvm profile use <name>` to switch without reinstalling. Edit presets with `phpvm profile edit`.
+
 - `wordpress` — curl, dom, gd, intl, mbstring, mysqli, openssl, pdo_mysql, xml, zip
 - `laravel` — curl, intl, mbstring, openssl, pdo_mysql, tokenizer, xml, zip
-- `minimal` — minimal extension set
+- `minimal` — no extensions (bundled starter)
 
 ### Project Detection
 

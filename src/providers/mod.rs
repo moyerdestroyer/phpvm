@@ -1,12 +1,11 @@
 mod docker;
 mod local;
-mod static_php;
+pub mod static_php;
 
 use anyhow::Result;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::manifest::ManifestEntry;
-use crate::profile::Profile;
+use crate::manifest::{Manifest, ManifestEntry};
 
 /// A runtime provider knows how to install and set up a PHP runtime.
 pub trait Provider {
@@ -15,8 +14,27 @@ pub trait Provider {
     fn name(&self) -> &str;
 
     /// Install a runtime described by the manifest entry into the target directory.
-    fn install(&self, entry: &ManifestEntry, target: &Utf8PathBuf, profile: &Profile)
-        -> Result<()>;
+    fn install(
+        &self,
+        entry: &ManifestEntry,
+        target: &Utf8PathBuf,
+        profile_name: &str,
+        project_dir: &Utf8Path,
+        manifest: Option<&Manifest>,
+        catalog: &[String],
+    ) -> Result<()>;
+}
+
+/// Apply a profile ini preset to an installed runtime (no download).
+pub fn apply_preset(
+    target: &Utf8PathBuf,
+    profile_name: &str,
+    project_dir: &Utf8Path,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+    entry: &ManifestEntry,
+) -> Result<()> {
+    static_php::apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
 }
 
 /// Return the default provider (static_php for V1).

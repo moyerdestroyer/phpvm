@@ -329,6 +329,30 @@ fn phpvm_install_accepts_profile_flag() {
         .stdout(predicate::str::contains("--profile"));
 }
 
+#[test]
+fn phpvm_profile_use_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("profile")
+        .arg("use")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("profile"))
+        .stdout(predicate::str::contains("--version"));
+}
+
+#[test]
+fn phpvm_use_accepts_profile_flag() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("use")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--profile"));
+}
+
 // ---------------------------------------------------------------------------
 // Profiles command
 // ---------------------------------------------------------------------------
@@ -354,5 +378,5 @@ fn phpvm_profiles_json_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"name\""))
-        .stdout(predicate::str::contains("\"extensions\""));
+        .stdout(predicate::str::contains("\"source\""));
 }
