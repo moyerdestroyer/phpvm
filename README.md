@@ -28,11 +28,11 @@ Manual downloads: [GitHub Releases](https://github.com/moyerdestroyer/phpvm/rele
 
 ## Quickstart
 
-One full PHP binary per version. **Profiles** are named `.ini` presets (extensions, memory, opcache, etc.) — switch instantly, no reinstall.
+One full PHP binary per version. **Profiles** are named `.ini` presets (extensions, memory, opcache, etc.) — switch instantly, no reinstall. 
 
 ```bash
-phpvm install 8.3 --profile=wordpress
-phpvm profile use laravel          # swap active php.ini
+phpvm install 8.3
+phpvm profile use laravel          # use the "laravel" preset php.ini
 phpvm profile edit wordpress       # open preset in $EDITOR
 phpvm profile new debug --from minimal
 phpvm profiles                     # list presets + paths
