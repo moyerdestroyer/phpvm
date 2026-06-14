@@ -7,6 +7,8 @@
 # Advanced:
 #   PHPVM_VERSION=0.1.0 PHPVM_INSTALL_DIR=$HOME/bin bash install.sh
 #   PHPVM_UNINSTALL=1 bash install.sh
+#   PHPVM_MODIFY_SHELL=1 curl ... | bash  # add shell integration to rc without prompting
+#   PHPVM_MODIFY_SHELL=0 curl ... | bash  # never modify shell rc (manual hint only)
 #
 # The script downloads a prebuilt binary from GitHub Releases, verifies its
 # checksum, and installs it into a user-writable directory (default ~/.local/bin).
@@ -19,6 +21,10 @@ DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_DIR="${PHPVM_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 VERSION="${PHPVM_VERSION:-}"
 UNINSTALL="${PHPVM_UNINSTALL:-}"
+MODIFY_SHELL="${PHPVM_MODIFY_SHELL:-${PHPVM_MODIFY_PATH:-}}"
+
+SHELL_MARKER_BEGIN="# phpvm installer: enable shell integration (begin)"
+SHELL_MARKER_END="# phpvm installer: enable shell integration (end)"
 
 # Optional hook for local/CI testing of the installer itself (not used in normal runs).
 # If set, the script will fetch "${PHPVM_TEST_DOWNLOAD_BASE}/phpvm-${VER}-${TARGET}.tar.gz"
@@ -181,28 +187,269 @@ install_binary() {
   echo "$dest"
 }
 
-is_in_path() {
-  local dir="$1"
-  case ":${PATH}:" in
-    *":${dir}:"*) return 0 ;;
+shell_quote() {
+  local value="$1"
+  printf "'%s'" "$(printf "%s" "$value" | sed "s/'/'\\\\''/g")"
+}
+
+# Pick the shell rc file most users of this shell will actually load.
+detect_shell_rc() {
+  if [[ "${PROFILE:-}" == "/dev/null" ]]; then
+    return 0
+  fi
+  if [[ -n "${PROFILE:-}" && -f "${PROFILE}" ]]; then
+    echo "${PROFILE}"
+    return 0
+  fi
+
+  local shell_name="${SHELL##*/}"
+  local detected=""
+
+  case "$shell_name" in
+    bash)
+      if [[ -f "${HOME}/.bashrc" ]]; then
+        detected="${HOME}/.bashrc"
+      elif [[ -f "${HOME}/.bash_profile" ]]; then
+        detected="${HOME}/.bash_profile"
+      fi
+      ;;
+    zsh)
+      local zdot="${ZDOTDIR:-${HOME}}"
+      if [[ -f "${zdot}/.zshrc" ]]; then
+        detected="${zdot}/.zshrc"
+      elif [[ -f "${zdot}/.zprofile" ]]; then
+        detected="${zdot}/.zprofile"
+      fi
+      ;;
+    fish)
+      detected="${HOME}/.config/fish/config.fish"
+      ;;
+  esac
+
+  if [[ -z "$detected" ]]; then
+    for candidate in ".profile" ".bashrc" ".bash_profile" ".zprofile" ".zshrc"; do
+      local zdot="${ZDOTDIR:-${HOME}}"
+      if [[ -f "${zdot}/${candidate}" ]]; then
+        detected="${zdot}/${candidate}"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "$detected" ]]; then
+    echo "$detected"
+  fi
+}
+
+profile_configures_env() {
+  local f
+  for f in \
+    "${HOME}/.bashrc" "${HOME}/.bash_profile" \
+    "${ZDOTDIR:-${HOME}}/.zshrc" "${ZDOTDIR:-${HOME}}/.zprofile" \
+    "${HOME}/.profile" "${HOME}/.config/fish/config.fish"; do
+    [[ -f "$f" ]] || continue
+    if grep -qF "$SHELL_MARKER_BEGIN" "$f" 2>/dev/null \
+      || grep -qF 'phpvm env' "$f" 2>/dev/null; then
+      echo "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+remove_shell_integration_from_rc() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 0
+
+  if ! grep -qF "$SHELL_MARKER_BEGIN" "$rc_file" 2>/dev/null; then
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  awk -v begin="$SHELL_MARKER_BEGIN" -v end="$SHELL_MARKER_END" '
+    $0 == begin { skip=1; next }
+    $0 == end { skip=0; next }
+    skip == 0 { print }
+  ' "$rc_file" >"$tmp"
+  mv "$tmp" "$rc_file"
+  info "Removed phpvm shell integration from ${rc_file}"
+}
+
+can_prompt() {
+  [[ -r /dev/tty && -w /dev/tty ]]
+}
+
+# Read y/n from the controlling terminal (works when stdin is a curl pipe).
+prompt_yes_no() {
+  local prompt="$1"
+  local default="${2:-n}"
+  local response
+
+  if ! can_prompt; then
+    return 1
+  fi
+
+  if [[ "$default" == "y" ]]; then
+    printf "%s [Y/n] " "$prompt" >/dev/tty
+  else
+    printf "%s [y/N] " "$prompt" >/dev/tty
+  fi
+  read -r response </dev/tty || return 1
+  case "${response:-$default}" in
+    y|Y|yes|YES) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-print_path_hint() {
-  local dir="$1"
+append_shell_integration_to_rc() {
+  local rc_file="$1"
+  local installed="$2"
+  local install_dir="$3"
+  local quoted_installed
+  local quoted_install_dir
+  quoted_installed="$(shell_quote "$installed")"
+  quoted_install_dir="$(shell_quote "$install_dir")"
+  local shell_flag="posix"
+
+  if [[ "${rc_file##*/}" == "config.fish" ]]; then
+    shell_flag="fish"
+  fi
+
+  if [[ -f "$rc_file" ]] && grep -qF "$SHELL_MARKER_BEGIN" "$rc_file" 2>/dev/null; then
+    info "phpvm shell integration already present in ${rc_file}"
+    return 0
+  fi
+
+  if [[ -f "$rc_file" ]] && grep -qF 'phpvm env' "$rc_file" 2>/dev/null; then
+    info "${rc_file} already references phpvm env; leaving it unchanged"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$rc_file")"
+  {
+    echo ""
+    echo "$SHELL_MARKER_BEGIN"
+    echo "export PHPVM_BIN=${quoted_installed}"
+    if [[ "${rc_file##*/}" == "config.fish" ]]; then
+      echo "if not contains -- ${quoted_install_dir} \$PATH"
+      echo "  set -gx PATH ${quoted_install_dir} \$PATH"
+      echo "end"
+      echo 'if test -x "$PHPVM_BIN"'
+      echo '  $PHPVM_BIN env --shell fish | source'
+      echo "end"
+    else
+      echo "case \":\${PATH}:\": in"
+      echo "  *\":${install_dir}:\"*) ;;"
+      echo "  *) export PATH=${quoted_install_dir}:\$PATH ;;"
+      echo "esac"
+      echo '[ -x "$PHPVM_BIN" ] && eval "$("$PHPVM_BIN" env --shell '"$shell_flag"')"'
+    fi
+    echo "$SHELL_MARKER_END"
+  } >>"$rc_file"
+  info "Updated ${rc_file}"
+}
+
+phpvm_config_set_use_on_cd() {
+  local enabled="$1"
+  local config_dir="${PHPVM_HOME:-${HOME}/.phpvm}"
+  local config_file="${config_dir}/config.toml"
+
+  mkdir -p "$config_dir"
+  if [[ -f "$config_file" ]] && grep -qE '^[[:space:]]*use_on_cd[[:space:]]*=' "$config_file" 2>/dev/null; then
+    sed -i -E "s/^[[:space:]]*use_on_cd[[:space:]]*=.*/use_on_cd = ${enabled}/" "$config_file"
+  elif [[ -f "$config_file" ]]; then
+    printf '\nuse_on_cd = %s\n' "$enabled" >>"$config_file"
+  else
+    printf 'use_on_cd = %s\n' "$enabled" >"$config_file"
+  fi
+}
+
+print_source_hint() {
+  local rc_file="$1"
   info ""
-  info "NOTE: ${dir} is not in your \$PATH."
-  info "Add it to your shell profile (e.g. ~/.bashrc, ~/.zshrc, ~/.profile):"
+  info "Run: source ${rc_file}"
+  info "Or open a new terminal, then try: phpvm --help"
+  info "After installing a runtime, try: phpvm use 8.3 && php -v"
+  info "Per-project auto-switch on cd: set use_on_cd = true in ~/.phpvm/config.toml"
   info ""
-  info "    export PATH=\"${dir}:\$PATH\""
+}
+
+print_env_hint() {
+  local rc_file="$1"
+  local installed="$2"
+  local install_dir="$3"
+  local quoted_installed
+  local quoted_install_dir
+  quoted_installed="$(shell_quote "$installed")"
+  quoted_install_dir="$(shell_quote "$install_dir")"
+
   info ""
-  info "Then restart your shell or run: source <your-profile>"
+  info "For phpvm plus bare php/composer after phpvm use, add this to ${rc_file}:"
   info ""
+  info "    $SHELL_MARKER_BEGIN"
+  info "    export PHPVM_BIN=${quoted_installed}"
+  info "    export PATH=${quoted_install_dir}:\$PATH"
+  info '    [ -x "$PHPVM_BIN" ] && eval "$("$PHPVM_BIN" env)"'
+  info "    $SHELL_MARKER_END"
+  info ""
+  info "Then restart your shell or run: source ${rc_file}"
+  info "Optional: use_on_cd = true in ~/.phpvm/config.toml auto-switches on cd"
+  info ""
+}
+
+configure_shell_integration() {
+  local installed="$1"
+  local install_dir="$2"
+  local rc_file
+  rc_file="$(detect_shell_rc)"
+
+  if [[ -z "$rc_file" ]]; then
+    info ""
+    info "No shell profile found. Add phpvm to PATH and run: eval \"\$(phpvm env)\""
+    info ""
+    return
+  fi
+
+  local configured_in=""
+  if configured_in="$(profile_configures_env)"; then
+    info ""
+    info "phpvm shell integration is configured in ${configured_in}."
+    info ""
+    return
+  fi
+
+  local should_update=0
+  if [[ "$MODIFY_SHELL" == "1" || "$MODIFY_SHELL" == "yes" ]]; then
+    should_update=1
+  elif [[ "$MODIFY_SHELL" == "0" || "$MODIFY_SHELL" == "no" ]]; then
+    should_update=0
+  elif prompt_yes_no "Enable phpvm shell integration via ${rc_file}?"; then
+    should_update=1
+  fi
+
+  if [[ $should_update -eq 1 ]]; then
+    append_shell_integration_to_rc "$rc_file" "$installed" "$install_dir"
+    if prompt_yes_no "Auto-switch PHP when cd'ing into projects with .phpvm-version?"; then
+      phpvm_config_set_use_on_cd true
+      info "Enabled use_on_cd in ~/.phpvm/config.toml"
+    fi
+    print_source_hint "$rc_file"
+  else
+    print_env_hint "$rc_file" "$installed" "$install_dir"
+  fi
 }
 
 do_uninstall() {
   local bin="${INSTALL_DIR}/phpvm"
+  local rc_file
+  for rc_file in \
+    "${HOME}/.bashrc" "${HOME}/.bash_profile" \
+    "${ZDOTDIR:-${HOME}}/.zshrc" "${ZDOTDIR:-${HOME}}/.zprofile" \
+    "${HOME}/.profile" "${HOME}/.config/fish/config.fish"; do
+    remove_shell_integration_from_rc "$rc_file"
+  done
+
   if [[ -f "$bin" ]]; then
     rm -f "$bin"
     info "Removed $bin"
@@ -282,13 +529,7 @@ main() {
     "$installed" --version
   fi
 
-  if ! is_in_path "$INSTALL_DIR"; then
-    print_path_hint "$INSTALL_DIR"
-  else
-    info ""
-    info "phpvm is on your PATH. Try: phpvm --help"
-    info ""
-  fi
+  configure_shell_integration "$installed" "$INSTALL_DIR"
 
   info "To update later, re-run the same curl | bash command (or set PHPVM_VERSION)."
   info "To uninstall: PHPVM_UNINSTALL=1 bash install.sh  (or simply rm ${INSTALL_DIR}/phpvm)"

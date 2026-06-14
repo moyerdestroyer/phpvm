@@ -151,12 +151,16 @@ fn phpvm_info_help() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn phpvm_use_requires_version() {
+fn phpvm_use_without_pin_or_default_fails() {
+    let home = tempfile::tempdir().unwrap();
+
     Command::cargo_bin("phpvm")
         .unwrap()
+        .env("PHPVM_HOME", home.path())
         .arg("use")
         .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("No PHP version specified"));
 }
 
 #[test]
@@ -214,6 +218,110 @@ fn phpvm_env_help() {
         .success()
         .stdout(predicate::str::contains("shell integration"))
         .stdout(predicate::str::contains("fnm"));
+}
+
+#[test]
+fn phpvm_env_wrapper_marks_use_invocations() {
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .arg("env")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("__phpvm_bin="))
+        .stdout(predicate::str::contains("use|deactivate"))
+        .stdout(predicate::str::contains(
+            r#"PHPVM_SHELL_INTEGRATION=1 "$__phpvm_bin""#,
+        ));
+}
+
+#[test]
+fn phpvm_deactivate_emits_path_cleanup() {
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .arg("deactivate")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "unset PHPVM_VERSION COMPOSER_HOME PHPRC",
+        ))
+        .stdout(predicate::str::contains("hash -r"));
+}
+
+#[test]
+fn phpvm_deactivate_help() {
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .arg("deactivate")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Undo"));
+}
+
+#[test]
+fn phpvm_env_emits_cd_hook_when_use_on_cd_enabled() {
+    let home = tempfile::tempdir().unwrap();
+    let config_dir = home.path().join("config.toml");
+    std::fs::write(&config_dir, "use_on_cd = true\n").unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .arg("env")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("__phpvm_auto_use"));
+}
+
+#[test]
+fn phpvm_env_omits_cd_hook_by_default() {
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .arg("env")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("__phpvm_auto_use").not());
+}
+
+#[test]
+fn phpvm_env_fish_output() {
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .arg("env")
+        .arg("--shell")
+        .arg("fish")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("function phpvm"));
+}
+
+#[test]
+fn phpvm_use_reads_phpvm_version_file() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".phpvm-version"), "8.3\n").unwrap();
+
+    Command::cargo_bin("phpvm")
+        .unwrap()
+        .env("PHPVM_HOME", home.path())
+        .current_dir(project.path())
+        .arg("use")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not installed"))
+        .stderr(predicate::str::contains("8.3"));
 }
 
 // ---------------------------------------------------------------------------

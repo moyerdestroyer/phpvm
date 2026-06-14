@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::config;
 use crate::manifest;
-use crate::output;
+use crate::output::{self, StepList};
 use crate::providers;
 use crate::runtime_metadata::RuntimeMetadata;
 
@@ -11,7 +11,7 @@ use crate::runtime_metadata::RuntimeMetadata;
 /// Flow: Resolve version against manifest → Download full binary once →
 ///       Apply initial profile ini preset
 pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
-    output::info(&format!("Installing PHP runtime: {}", version));
+    output::heading(&format!("Installing PHP {version}"));
 
     let project_dir = config::current_project_dir()?;
     let config = config::load_config(&project_dir)?;
@@ -20,15 +20,16 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
     let profile_label =
         profile_name.unwrap_or_else(|| config.profile.as_deref().unwrap_or("minimal"));
 
-    output::info(&format!("Profile: {}", profile_label));
-
     let available = mf.available_versions();
     if available.is_empty() {
         anyhow::bail!("Manifest has no runtime artifacts available.");
     }
 
     let resolved = crate::version::resolve_specifier(version, &available)?;
-    output::info(&format!("Resolved to: {}", resolved));
+
+    output::label("Profile:", profile_label);
+    output::label("Resolved:", &resolved);
+    output::blank();
 
     let manifest_entry = mf
         .find(&resolved)
@@ -50,7 +51,7 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
     if runtime_installed {
         if let Some(active) = RuntimeMetadata::read_active_profile(&resolved)? {
             if active == profile_label {
-                output::info(&format!(
+                output::success(&format!(
                     "Runtime {} already installed (profile: {})",
                     resolved, profile_label
                 ));
@@ -58,18 +59,25 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
             }
         }
 
-        output::info(&format!(
-            "Runtime {} already installed; switching to profile '{}'",
-            resolved, profile_label
-        ));
-        providers::apply_preset(
+        let mut steps = StepList::new();
+        steps.done("Runtime present");
+        let step_label = format!("Apply profile '{profile_label}'");
+        steps.start(&step_label);
+        if let Err(e) = providers::apply_preset(
             &runtime_path,
             profile_label,
             &project_dir,
             Some(&mf),
             &catalog,
             &manifest_entry,
-        )?;
+        ) {
+            steps.fail(&step_label, &e.to_string());
+            steps.finish();
+            return Err(e);
+        }
+        steps.done(&format!("Applied profile '{profile_label}'"));
+        steps.finish();
+
         output::success(&format!(
             "Switched PHP {} to profile '{}'",
             resolved, profile_label
@@ -87,6 +95,7 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
         &catalog,
     )?;
 
+    output::blank();
     output::success(&format!("Installed PHP {} ({})", resolved, profile_label));
     Ok(())
 }

@@ -1,0 +1,14 @@
+---
+source: src/output.rs
+expression: render_doctor_human(&sample_doctor_result())
+---
+Project Inspection
+Project Type:   wordpress
+PHP Constraint: ^8.1
+Profile:        wordpress
+Required:       mysqli
+Missing from active profile: imagick
+Try: phpvm profile use wordpress or phpvm profile edit wordpress
+Recommended Matrix:
+  8.1
+  8.3

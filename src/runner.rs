@@ -138,7 +138,7 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
     let resolved = resolve_runtime(version)?;
     let runtime_path = require_runtime(&resolved, version)?;
 
-    output::info(&format!("Running with PHP {}", resolved));
+    output::info_stderr(&format!("Running with PHP {}", output::dim(&resolved)));
 
     let (program, args) = command
         .split_first()
@@ -240,10 +240,8 @@ fn require_runtime(resolved: &str, original: &str) -> Result<Utf8PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::env_lock::LOCK as ENV_LOCK;
     use std::ffi::OsString;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvSnapshot {
         phpvm_home: Option<OsString>,

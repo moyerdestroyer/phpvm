@@ -18,7 +18,7 @@ Installs to `~/.local/bin/phpvm` (override with `PHPVM_INSTALL_DIR`). Supports L
 
 ```bash
 # Pin a version
-curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.1.1 bash
 
 # Build from source (Rust)
 cargo install --git https://github.com/moyerdestroyer/phpvm
@@ -52,7 +52,7 @@ profile = "wordpress"
 
 Preset lookup: `.phpvm/profiles/<name>.ini` → `~/.phpvm/profiles/` → bundled starters (`wordpress`, `laravel`, `minimal`). Commit project presets; phpvm never overwrites existing files.
 
-For daily dev, add `eval "$(phpvm env)"` to your shell rc, then `phpvm use 8.3 --profile=laravel` makes bare `php`/`composer` work. Prefer `run` and `matrix` for reproducible checks.
+For daily dev, enable the shell integration when the installer asks. It adds one shell rc block that points at the installed binary and runs `phpvm env`, which makes `phpvm` available as a shell function and makes `phpvm use 8.3 --profile=laravel` activate bare `php`/`composer`. Prefer `run` and `matrix` for reproducible checks.
 
 ## Uninstall
 

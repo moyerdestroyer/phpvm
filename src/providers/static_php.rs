@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::Provider;
 use crate::manifest::{Manifest, ManifestEntry};
+use crate::output::{self, StepList};
 use crate::profile_preset;
 use crate::runtime_metadata::RuntimeMetadata;
 
@@ -36,74 +37,131 @@ impl Provider for StaticPhpProvider {
         manifest: Option<&Manifest>,
         catalog: &[String],
     ) -> Result<()> {
-        // ── 1. Resolve per-platform artifact (manifest v2.1) ───────────
-        let artifact = entry
-            .download_for_host()
-            .context("Failed to resolve runtime artifact for this host")?;
-
-        // ── 2. Download archive to a temporary file ────────────────────
-        let archive_file =
-            download_archive(&artifact.url).context("Failed to download runtime archive")?;
-        let archive_path = Utf8PathBuf::from_path_buf(archive_file.path().to_path_buf())
-            .map_err(|p| anyhow::anyhow!("Temporary archive path is not valid UTF-8: {:?}", p))?;
-
-        // ── 3. Verify SHA-256 checksum ────────────────────────────────
-        verify_checksum(&archive_path, &artifact.sha256)
-            .context("SHA-256 checksum verification failed")?;
-
-        // ── 4. Extract to a staging directory, then move atomically ───
-        let staging_path = target
-            .parent()
-            .map(|p| {
-                p.join(format!(
-                    ".staging-{}",
-                    target.file_name().unwrap_or("runtime")
-                ))
-            })
-            .ok_or_else(|| anyhow::anyhow!("Invalid runtime target path {}", target))?;
-
-        if staging_path.exists() {
-            fs::remove_dir_all(&staging_path)
-                .with_context(|| format!("Failed to clear staging directory {}", staging_path))?;
-        }
-
-        extract_archive(&archive_path, &staging_path)
-            .context("Failed to extract runtime archive")?;
-
-        // ── 5. Verify the extracted runtime has bin/php + bin/composer ─
-        let bin_php = staging_path.join("bin").join(runtime_binary_name("php"));
-        if !bin_php.exists() {
-            let _ = fs::remove_dir_all(&staging_path);
-            anyhow::bail!(
-                "Runtime directory {} does not contain bin/php after extraction",
-                staging_path
-            );
-        }
-        let bin_composer = staging_path
-            .join("bin")
-            .join(runtime_binary_name("composer"));
-        if !bin_composer.exists() {
-            let _ = fs::remove_dir_all(&staging_path);
-            anyhow::bail!(
-                "Runtime directory {} does not contain bin/composer after extraction",
-                staging_path
-            );
-        }
-
-        if target.exists() {
-            fs::remove_dir_all(target)
-                .with_context(|| format!("Failed to replace existing runtime {}", target))?;
-        }
-
-        fs::rename(&staging_path, target)
-            .with_context(|| format!("Failed to move staged runtime into {}", target))?;
-
-        // ── 6. Apply initial profile ini preset + metadata ────────────
-        apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
-            .context("Failed to apply profile")?;
-
-        Ok(())
+        let mut steps = StepList::new();
+        let result = install_with_steps(
+            entry,
+            target,
+            profile_name,
+            project_dir,
+            manifest,
+            catalog,
+            &mut steps,
+        );
+        steps.finish();
+        result
     }
+}
+
+fn install_with_steps(
+    entry: &ManifestEntry,
+    target: &Utf8PathBuf,
+    profile_name: &str,
+    project_dir: &camino::Utf8Path,
+    manifest: Option<&Manifest>,
+    catalog: &[String],
+    steps: &mut StepList,
+) -> Result<()> {
+    steps.start("Resolve artifact for host");
+    let artifact = match entry.download_for_host() {
+        Ok(artifact) => artifact,
+        Err(e) => {
+            steps.fail("Resolve artifact for host", &e.to_string());
+            return Err(e).context("Failed to resolve runtime artifact for this host");
+        }
+    };
+    let host_target = crate::manifest::host_target().unwrap_or_else(|_| "host".to_string());
+    steps.done(&format!("Resolved artifact for {host_target}"));
+
+    steps.start("Download archive");
+    let archive_file = match download_archive(&artifact.url, steps) {
+        Ok(file) => file,
+        Err(e) => {
+            steps.fail("Download archive", &e.to_string());
+            return Err(e).context("Failed to download runtime archive");
+        }
+    };
+    steps.done("Downloaded archive");
+
+    let archive_path = match Utf8PathBuf::from_path_buf(archive_file.path().to_path_buf()) {
+        Ok(path) => path,
+        Err(p) => {
+            let msg = format!("Temporary archive path is not valid UTF-8: {p:?}");
+            steps.fail("Download archive", &msg);
+            anyhow::bail!("{msg}");
+        }
+    };
+
+    steps.start("Verify SHA-256 checksum");
+    if let Err(e) = verify_checksum(&archive_path, &artifact.sha256) {
+        steps.fail("Verify SHA-256 checksum", &e.to_string());
+        return Err(e).context("SHA-256 checksum verification failed");
+    }
+    steps.done("Verified SHA-256 checksum");
+
+    let staging_path = target
+        .parent()
+        .map(|p| {
+            p.join(format!(
+                ".staging-{}",
+                target.file_name().unwrap_or("runtime")
+            ))
+        })
+        .ok_or_else(|| anyhow::anyhow!("Invalid runtime target path {}", target))?;
+
+    steps.start("Extract runtime");
+    if staging_path.exists() {
+        if let Err(e) = fs::remove_dir_all(&staging_path) {
+            steps.fail("Extract runtime", &e.to_string());
+            return Err(e)
+                .with_context(|| format!("Failed to clear staging directory {staging_path}"));
+        }
+    }
+
+    if let Err(e) = extract_archive(&archive_path, &staging_path) {
+        steps.fail("Extract runtime", &e.to_string());
+        return Err(e).context("Failed to extract runtime archive");
+    }
+    steps.done("Extracted runtime");
+
+    steps.start("Verify runtime binaries");
+    let bin_php = staging_path.join("bin").join(runtime_binary_name("php"));
+    if !bin_php.exists() {
+        let _ = fs::remove_dir_all(&staging_path);
+        let msg =
+            format!("Runtime directory {staging_path} does not contain bin/php after extraction");
+        steps.fail("Verify runtime binaries", &msg);
+        anyhow::bail!("{msg}");
+    }
+    let bin_composer = staging_path
+        .join("bin")
+        .join(runtime_binary_name("composer"));
+    if !bin_composer.exists() {
+        let _ = fs::remove_dir_all(&staging_path);
+        let msg = format!(
+            "Runtime directory {staging_path} does not contain bin/composer after extraction"
+        );
+        steps.fail("Verify runtime binaries", &msg);
+        anyhow::bail!("{msg}");
+    }
+    steps.done("Verified bin/php and bin/composer");
+
+    if target.exists() {
+        fs::remove_dir_all(target)
+            .with_context(|| format!("Failed to replace existing runtime {}", target))?;
+    }
+
+    fs::rename(&staging_path, target)
+        .with_context(|| format!("Failed to move staged runtime into {}", target))?;
+
+    let profile_label = format!("Apply profile '{profile_name}'");
+    steps.start(&profile_label);
+    if let Err(e) = apply_preset(target, profile_name, project_dir, manifest, catalog, entry) {
+        steps.fail(&profile_label, &e.to_string());
+        return Err(e).context("Failed to apply profile");
+    }
+    steps.done(&format!("Applied profile '{profile_name}'"));
+
+    Ok(())
 }
 
 // ── Download ──────────────────────────────────────────────────────────────
@@ -111,7 +169,7 @@ impl Provider for StaticPhpProvider {
 /// Download the runtime archive from `url` to a temporary file.
 ///
 /// The temporary file is deleted when the returned handle is dropped.
-fn download_archive(url: &str) -> Result<tempfile::NamedTempFile> {
+fn download_archive(url: &str, steps: &StepList) -> Result<tempfile::NamedTempFile> {
     let mut tmp_file = tempfile::Builder::new()
         .suffix(&archive_suffix(url))
         .tempfile()
@@ -126,48 +184,15 @@ fn download_archive(url: &str) -> Result<tempfile::NamedTempFile> {
         .with_context(|| format!("Download returned error status from {}", url))?;
 
     let total_size = response.content_length();
+    let progress_bar = steps.add_download_bar(total_size);
+    let file = tmp_file.as_file_mut();
 
-    // Create progress bar. If we know the total size, use a bar; otherwise
-    // show a spinner with byte count.
-    let progress = indicatif::ProgressBar::new(total_size.unwrap_or(0));
-    if total_size.is_some() {
-        progress.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
-                     {bytes}/{total_bytes} ({eta})",
-                )
-                .expect("hardcoded progress bar template is valid")
-                .progress_chars("#>-"),
-        );
-    } else {
-        progress.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.green} [{elapsed_precise}] {bytes} downloaded")
-                .expect("hardcoded progress spinner template is valid"),
-        );
+    output::download_with_progress(response, file, &progress_bar)
+        .with_context(|| format!("Failed to read response from {}", url))?;
+
+    if !progress_bar.is_hidden() {
+        progress_bar.finish_and_clear();
     }
-
-    let mut file = tmp_file.as_file_mut();
-
-    let mut downloaded: u64 = 0;
-    let mut buffer = [0u8; 8192];
-    let mut reader = response;
-
-    loop {
-        let bytes_read = reader
-            .read(&mut buffer)
-            .with_context(|| format!("Failed to read response from {}", url))?;
-        if bytes_read == 0 {
-            break;
-        }
-        io::Write::write_all(&mut file, &buffer[..bytes_read])
-            .with_context(|| "Failed to write downloaded archive to temporary file")?;
-        downloaded += bytes_read as u64;
-        progress.set_position(downloaded);
-    }
-
-    progress.finish_with_message("Download complete");
 
     Ok(tmp_file)
 }

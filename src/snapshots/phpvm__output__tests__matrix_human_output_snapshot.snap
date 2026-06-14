@@ -1,0 +1,10 @@
+---
+source: src/output.rs
+expression: "render_matrix_human(&sample_matrix_result(RunStatus::Fail), false)"
+---
+PHP Compatibility Matrix
+8.3.23 PASS
+8.2.28 FAIL
+  exit 1
+
+Overall: FAIL

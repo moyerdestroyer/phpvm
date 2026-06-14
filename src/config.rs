@@ -10,6 +10,9 @@ pub struct Config {
     /// Default PHP version constraint (e.g. ">=8.1")
     pub php_constraint: Option<String>,
 
+    /// Project-local PHP version pin (e.g. "8.3", "8.3.latest") from `.phpvm.toml`.
+    pub version: Option<String>,
+
     /// Default profile preset name (wordpress, laravel, minimal, or custom)
     pub profile: Option<String>,
 
@@ -23,6 +26,12 @@ pub struct Config {
     /// across shell sessions and terminals, similar to fnm defaults).
     #[serde(default)]
     pub current_version: Option<String>,
+
+    /// When true, shell integration (`phpvm env`) emits a directory-change hook
+    /// that runs `phpvm use` in projects with `.phpvm-version` / `.phpvm.toml`.
+    /// Global-only — set in `~/.phpvm/config.toml`.
+    #[serde(default)]
+    pub use_on_cd: bool,
 }
 
 /// Returns the PHPVM data directory.
@@ -118,10 +127,32 @@ pub fn get_current_version() -> Option<String> {
     load_global_config().ok()?.current_version
 }
 
+/// Whether per-project auto-switch on directory change is enabled (global config).
+pub fn use_on_cd_enabled() -> bool {
+    load_global_config().ok().is_some_and(|cfg| cfg.use_on_cd)
+}
+
+/// Clear the persisted active version (used by `phpvm deactivate --persist`).
+pub fn clear_current_version() -> Result<()> {
+    let dir = data_dir()?;
+    let path = dir.join("config.toml");
+    let mut cfg = load_global_config()?;
+    cfg.current_version = None;
+
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create config directory {}", dir))?;
+
+    let serialized =
+        toml::to_string_pretty(&cfg).with_context(|| "Failed to serialize global config")?;
+    std::fs::write(&path, serialized)
+        .with_context(|| format!("Failed to write global config to {}", path))?;
+    Ok(())
+}
+
 /// Load config: global `~/.phpvm/config.toml` overlaid by project `.phpvm.toml`.
 ///
-/// Project wins on `profile`, `php_constraint`, `matrix`, and `manifest_url`.
-/// `current_version` is global-only.
+/// Project wins on `version`, `profile`, `php_constraint`, `matrix`, and `manifest_url`.
+/// `current_version` and `use_on_cd` are global-only.
 pub fn load_config(project_dir: &Utf8Path) -> Result<Config> {
     let mut config = load_global_config()?;
 
@@ -140,6 +171,9 @@ pub fn load_config(project_dir: &Utf8Path) -> Result<Config> {
 fn merge_project_config(base: &mut Config, project: &Config) {
     if project.php_constraint.is_some() {
         base.php_constraint = project.php_constraint.clone();
+    }
+    if project.version.is_some() {
+        base.version = project.version.clone();
     }
     if project.profile.is_some() {
         base.profile = project.profile.clone();
@@ -165,6 +199,23 @@ mod tests {
         }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn use_on_cd_defaults_to_false() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(!config.use_on_cd);
+    }
+
+    #[test]
+    fn use_on_cd_enabled_reads_global_config() {
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("PHPVM_HOME", dir.path());
+        write_file(&dir, "config.toml", "use_on_cd = true\n");
+
+        assert!(use_on_cd_enabled());
+
+        std::env::remove_var("PHPVM_HOME");
     }
 
     #[test]

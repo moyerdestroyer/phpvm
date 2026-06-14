@@ -38,12 +38,28 @@ pub enum Command {
     /// (the wrapper handles applying the exports).
     ///
     /// Globals via `composer global` are isolated per minor series (8.3.x share).
+    ///
+    /// Omit the version to use `.phpvm-version`, `version` in `.phpvm.toml`, or the
+    /// last `phpvm use` default. Use `system` to clear phpvm from the current shell.
     Use {
-        /// PHP version to activate (e.g. 8.3, 8.3.23). Must be installed.
-        version: String,
+        /// PHP version to activate (e.g. 8.3, 8.3.23, system). Must be installed.
+        version: Option<String>,
         /// Extension profile ini preset to activate for this runtime
         #[arg(long)]
         profile: Option<String>,
+        /// Suppress informational messages (for shell hooks)
+        #[arg(long)]
+        silent: bool,
+    },
+
+    /// Undo `phpvm use` in the current shell (restore host PATH / env).
+    Deactivate {
+        /// Suppress informational messages
+        #[arg(long)]
+        silent: bool,
+        /// Clear the persisted default from `~/.phpvm/config.toml`
+        #[arg(long)]
+        persist: bool,
     },
 
     /// Print shell integration code.
@@ -58,10 +74,16 @@ pub enum Command {
     ///
     /// `phpvm use` is the single command that sets your active PHP version
     /// (persisted globally, no separate "default" needed).
+    ///
+    /// Per-project auto-switch on `cd` is controlled by `use_on_cd` in
+    /// `~/.phpvm/config.toml` (off by default).
     Env {
         /// Activate a specific version instead of the one from `phpvm use`.
         #[arg(long)]
         version: Option<String>,
+        /// Shell dialect for integration output (posix, fish)
+        #[arg(long, default_value = "posix", value_parser = ["posix", "fish"])]
+        shell: String,
     },
 
     /// Show the PHP version that is currently active (from `phpvm use` or

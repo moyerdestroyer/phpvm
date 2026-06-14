@@ -224,12 +224,13 @@ pub fn list_profiles(format: OutputFormat) -> Result<()> {
 }
 
 fn print_presets_human(presets: &[ListedPreset]) {
-    output::info("Available Profile Presets");
-    output::info("========================");
+    output::heading("Available Profile Presets");
     for preset in presets {
         output::list_item(&format!(
-            "{} [{}] {}",
-            preset.name, preset.source, preset.path
+            "{} {} {}",
+            output::bold(&preset.name),
+            output::dim(&format!("[{}]", preset.source)),
+            output::dim(&preset.path)
         ));
     }
 }

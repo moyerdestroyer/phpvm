@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::IsTerminal;
 
 use anyhow::{bail, Result};
 
@@ -7,6 +8,8 @@ use crate::manifest;
 use crate::output;
 use crate::profile;
 use crate::runner;
+
+const SHELL_INTEGRATION_ENV: &str = "PHPVM_SHELL_INTEGRATION";
 
 // ---------------------------------------------------------------------------
 // VersionSpecifier — how the user describes which version they want
@@ -238,6 +241,7 @@ pub fn list_installed() -> Result<()> {
 
     if versions.is_empty() {
         output::info("No runtimes installed.");
+        output::success("Run `phpvm install <version>` to get started.");
         return Ok(());
     }
 
@@ -245,50 +249,46 @@ pub fn list_installed() -> Result<()> {
     let installed_strs: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
     let current = compute_current_version(&installed_strs);
 
+    output::heading("Installed Runtimes");
     for v in &versions {
         let s = v.to_string();
         if current.as_deref() == Some(s.as_str()) {
-            println!("* {}", s);
+            output::list_active_item(&s);
         } else {
-            output::list_item(&s);
+            output::list_item_dim(&s);
         }
     }
 
     Ok(())
 }
 
-fn phprc_value(runtime_path: &camino::Utf8Path) -> Option<String> {
-    let php_ini = crate::runtime_metadata::active_php_ini(runtime_path);
-    if php_ini.exists() {
-        php_ini.parent().map(|dir| dir.to_string())
+/// Handle `phpvm use` including optional project pins, profiles, and `system`.
+pub fn run_use(version: Option<&str>, profile: Option<&str>, silent: bool) -> Result<()> {
+    if version == Some("system") {
+        return deactivate(silent, true);
+    }
+
+    let spec = crate::shell_env::resolve_use_spec(version)?;
+    let project_dir = if version.is_none() {
+        crate::shell_env::find_project_pin(&config::current_project_dir()?)?
+            .map(|pin| pin.project_dir)
     } else {
         None
+    };
+
+    let profile_name = if let Some(name) = profile {
+        Some(name.to_string())
+    } else if let Some(dir) = &project_dir {
+        config::load_config(dir)?.profile
+    } else {
+        None
+    };
+
+    if let Some(name) = profile_name.as_deref() {
+        profile::use_profile(name, Some(&spec))?;
     }
-}
 
-/// Build the shell export snippet for activating a specific resolved runtime.
-fn build_activation_snippet(resolved: &str, runtime_path: &camino::Utf8Path) -> Result<String> {
-    let bin_dir = runtime_path.join("bin");
-    let composer_home = composer_home_for(resolved)?;
-    let global_bin = composer_home.join("vendor").join("bin");
-
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let path_value = format!(
-        "{}{}{}{}{}",
-        bin_dir, separator, global_bin, separator, "$PATH"
-    );
-
-    let phprc_export = phprc_value(runtime_path)
-        .map(|dir| format!("export PHPRC=\"{}\"\n", dir))
-        .unwrap_or_default();
-
-    Ok(format!(
-        r#"export PHPVM_VERSION="{}"
-export COMPOSER_HOME="{}"
-export PATH="{}"
-{}"#,
-        resolved, composer_home, path_value, phprc_export
-    ))
+    activate(&spec, silent)
 }
 
 /// Activate a runtime for the current shell by printing an eval-able snippet.
@@ -300,13 +300,10 @@ export PATH="{}"
 /// - PHPVM_VERSION (so `phpvm ls` can mark it with *)
 /// - COMPOSER_HOME (isolates `composer global` packages per runtime)
 /// - PATH (so bare `php`, `composer`, and global tools from that runtime work)
-///
-/// The per-runtime globals live under `~/.phpvm/runtimes/<resolved>/composer-home/`.
-pub fn activate(spec: &str) -> Result<()> {
+pub fn activate(spec: &str, silent: bool) -> Result<()> {
     let resolved = match runner::resolve_version(spec) {
         Ok(r) => r,
         Err(_) => {
-            // Give a clear, actionable message for the common case.
             anyhow::bail!(
                 "PHP runtime matching '{}' is not installed. \
                  Run `phpvm install {}` first (or `phpvm ls` to see installed runtimes).",
@@ -316,7 +313,6 @@ pub fn activate(spec: &str) -> Result<()> {
         }
     };
 
-    // Verify it is actually on disk.
     let runtimes_dir = config::runtimes_dir()?;
     let runtime_path = runtimes_dir.join(&resolved);
     if !runtime_path.exists() {
@@ -327,47 +323,64 @@ pub fn activate(spec: &str) -> Result<()> {
         );
     }
 
-    // Persist so that `phpvm use` affects future terminals/sessions.
-    // "use" is the single command that determines the active version (no
-    // separate "default" setter is needed).
     config::set_current_version(&resolved)?;
 
-    // TODO (per-project "use"): Support a project-local declaration so that
-    // `phpvm use` (no argument) and/or shell integration can pick the right
-    // runtime + profile automatically inside a project.
-    //
-    // Options to consider:
-    //   - A lightweight `.phpvm-version` file containing just a specifier
-    //     (e.g. "8.3", "latest", "8.4.11") — analogous to .nvmrc / .node-version.
-    //   - Or (better for richness) reading from the existing project
-    //     `.phpvm.toml`, which can already express `php_constraint` + `profile`
-    //     (built-in or custom) + other settings.
-    //
-    // Important: any per-project mechanism must be able to specify the
-    // extension profile, not just the PHP version, because the user noted
-    // that "it would also require extension settings, not just php version."
-    //
-    // This would primarily affect `print_env` / activation and the no-arg
-    // case of `activate`. Global `phpvm use <ver>` should probably still
-    // override for the current user/session.
-
-    // Ensure the minor-series composer home exists for globals isolation.
-    // All 8.3.x patches share `~/.phpvm/composer-homes/8.3/`.
     if let Ok(composer_home) = composer_home_for(&resolved) {
         let _ = std::fs::create_dir_all(&composer_home);
     }
 
-    // Emit the activation snippet (for immediate effect in *this* shell via eval).
-    // Informational message on stderr; pure exports on stdout.
-    eprintln!(
-        "Using PHP {} from {}\n\
-         (This is now active here. For new terminals/sessions, put \
-         `eval \"$(phpvm env)\"` in your shell rc once.)",
-        resolved, runtime_path
-    );
-    let snippet = build_activation_snippet(&resolved, &runtime_path)?;
-    print!("{}", snippet);
+    crate::shell_env::warn_activation_conflicts(&resolved, silent);
 
+    let shell_managed =
+        std::env::var_os(SHELL_INTEGRATION_ENV).is_some() || !std::io::stdout().is_terminal();
+    if !silent {
+        if shell_managed {
+            eprintln!(
+                "Using PHP {} from {}\n\
+                 (This is active in this shell and persisted for new shells.)",
+                resolved, runtime_path
+            );
+        } else {
+            eprintln!(
+                "Selected PHP {} from {}\n\
+                 This shell cannot be updated by a standalone process. Run \
+                 `eval \"$(phpvm use {})\"` now, or add `eval \"$(phpvm env)\"` \
+                 to your shell rc once.",
+                resolved, runtime_path, spec
+            );
+        }
+    }
+
+    let snippet = crate::shell_env::build_activation_snippet(&resolved, &runtime_path)?;
+    print!("{}", snippet);
+    Ok(())
+}
+
+/// Undo phpvm activation in the current shell (`phpvm deactivate` / `phpvm use system`).
+pub fn deactivate(silent: bool, persist: bool) -> Result<()> {
+    if persist {
+        config::clear_current_version()?;
+    }
+
+    if !silent {
+        let shell_managed =
+            std::env::var_os(SHELL_INTEGRATION_ENV).is_some() || !std::io::stdout().is_terminal();
+        if shell_managed {
+            eprintln!(
+                "phpvm deactivated in this shell{}.",
+                if persist {
+                    " (persisted default cleared)"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            eprintln!("Run `eval \"$(phpvm deactivate)\"` to restore host PATH in this shell.");
+        }
+    }
+
+    let snippet = crate::shell_env::build_deactivation_snippet()?;
+    print!("{}", snippet);
     Ok(())
 }
 
@@ -413,68 +426,157 @@ pub fn show_current() -> Result<()> {
 ///
 /// Output is designed to be eval'ed, typically once from your shell rc:
 ///   eval "$(phpvm env)"
-///
-/// This sets up (modeled after fnm):
-/// - A `phpvm` shell function wrapper. After this, plain `phpvm use <ver>`
-///   will immediately update PATH / COMPOSER_HOME / PHPVM_VERSION in the
-///   *current* shell (no extra manual eval needed for each `use`).
-/// - Activation of the persisted current version (or one passed with --version)
-///   so new shells start with the last `phpvm use`d version.
-///
-/// See the "Daily development" section in the README for the recommended
-/// one-time setup.
-pub fn print_env(version: Option<&str>) -> Result<()> {
-    // Shell function wrapper. This is the key to removing the per-`use` eval step.
-    // Once installed via the rc, `phpvm use 8.2` (the function) will run the
-    // binary (for persistence) and then eval its export output in the current shell.
-    let wrapper = r#"phpvm() {
-  if [ "$1" = "use" ]; then
-    eval "$(command phpvm "$@")"
-  else
-    command phpvm "$@"
-  fi
-}
-"#;
-    print!("{}", wrapper);
+pub fn print_env(version: Option<&str>, shell: &str) -> Result<()> {
+    let phpvm_bin = std::env::current_exe()
+        .ok()
+        .and_then(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
+        .map(|path| path.to_string())
+        .unwrap_or_else(|| "phpvm".to_string());
+    let phpvm_bin = crate::shell_env::shell_quote(&phpvm_bin);
+    let use_on_cd = config::use_on_cd_enabled();
 
-    // Determine what (if anything) to activate in *this* shell right now.
-    let target_spec: Option<String> = match version {
-        Some(v) => Some(v.to_string()),
-        None => config::get_current_version(),
+    match shell {
+        "fish" => print_fish_wrapper(&phpvm_bin, use_on_cd)?,
+        _ => print_posix_wrapper(&phpvm_bin, use_on_cd)?,
+    }
+
+    let target_spec = resolve_env_activation_spec(version)?;
+    emit_activation_for_spec(target_spec.as_deref(), true);
+    Ok(())
+}
+
+fn resolve_env_activation_spec(version: Option<&str>) -> Result<Option<String>> {
+    if let Some(v) = version {
+        return Ok(Some(v.to_string()));
+    }
+
+    let project_dir = config::current_project_dir()?;
+    if let Some(pin) = crate::shell_env::find_project_pin(&project_dir)? {
+        return Ok(Some(pin.version_spec));
+    }
+
+    Ok(config::get_current_version())
+}
+
+fn emit_activation_for_spec(spec: Option<&str>, quiet_missing: bool) {
+    let Some(spec) = spec else {
+        return;
     };
 
-    if let Some(spec) = target_spec {
-        match runner::resolve_version(&spec) {
-            Ok(resolved) => {
-                let runtimes_dir = config::runtimes_dir()?;
-                let runtime_path = runtimes_dir.join(&resolved);
-
-                if runtime_path.exists() {
-                    if let Ok(composer_home) = composer_home_for(&resolved) {
-                        let _ = std::fs::create_dir_all(&composer_home);
+    match runner::resolve_version(spec) {
+        Ok(resolved) => {
+            let runtimes_dir = match config::runtimes_dir() {
+                Ok(dir) => dir,
+                Err(err) => {
+                    if !quiet_missing {
+                        eprintln!("phpvm env: {err}");
                     }
-
-                    if let Ok(snippet) = build_activation_snippet(&resolved, &runtime_path) {
-                        print!("{}", snippet);
-                    }
-                } else {
-                    eprintln!(
-                        "phpvm env: runtime {} not found on disk (wrapper installed anyway)",
-                        resolved
-                    );
+                    return;
                 }
-            }
-            Err(_) => {
+            };
+            let runtime_path = runtimes_dir.join(&resolved);
+
+            if runtime_path.exists() {
+                if let Ok(composer_home) = composer_home_for(&resolved) {
+                    let _ = std::fs::create_dir_all(&composer_home);
+                }
+
+                if let Ok(snippet) =
+                    crate::shell_env::build_activation_snippet(&resolved, &runtime_path)
+                {
+                    print!("{}", snippet);
+                }
+            } else if !quiet_missing {
                 eprintln!(
-                    "phpvm env: could not resolve '{}' (wrapper installed anyway). Run `phpvm use` to pick a version.",
-                    spec
+                    "phpvm env: runtime {resolved} not found on disk (wrapper installed anyway)"
                 );
             }
         }
+        Err(_) if !quiet_missing => {
+            eprintln!(
+                "phpvm env: could not resolve '{spec}' (wrapper installed anyway). \
+                 Run `phpvm use` to pick a version."
+            );
+        }
+        Err(_) => {}
     }
-    // No target spec at all (first time ever) → we still emitted the wrapper
-    // so the user can immediately run `phpvm use <something>` and have it apply.
+}
 
+fn print_posix_wrapper(phpvm_bin: &str, use_on_cd: bool) -> Result<()> {
+    let mut wrapper = format!(
+        r#"__phpvm_bin={phpvm_bin}
+phpvm() {{
+  case "$1" in
+    use|deactivate)
+      eval "$(PHPVM_SHELL_INTEGRATION=1 "$__phpvm_bin" "$@")"
+      ;;
+    *)
+      "$__phpvm_bin" "$@"
+      ;;
+  esac
+}}
+"#
+    );
+
+    if use_on_cd {
+        wrapper.push_str(
+            r#"
+__phpvm_prev_pwd="${PWD:-}"
+__phpvm_auto_use() {
+  if [ "${PWD:-}" = "$__phpvm_prev_pwd" ]; then
+    return 0
+  fi
+  __phpvm_prev_pwd="${PWD:-}"
+  if [ -n "${PHPVM_VERSION:-}" ]; then
+    return 0
+  fi
+  eval "$(PHPVM_SHELL_INTEGRATION=1 "$__phpvm_bin" use --silent 2>/dev/null)" || true
+}
+if [ -n "${ZSH_VERSION:-}" ]; then
+  autoload -Uz add-zsh-hook 2>/dev/null
+  if typeset -f add-zsh-hook >/dev/null 2>&1; then
+    add-zsh-hook chpwd __phpvm_auto_use
+  fi
+elif [ -n "${BASH_VERSION:-}" ]; then
+  if [[ ":${PROMPT_COMMAND:-}:" != *":__phpvm_auto_use:"* ]]; then
+    PROMPT_COMMAND="__phpvm_auto_use${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+  fi
+fi
+"#,
+        );
+    }
+
+    print!("{wrapper}");
+    Ok(())
+}
+
+fn print_fish_wrapper(phpvm_bin: &str, use_on_cd: bool) -> Result<()> {
+    let mut wrapper = format!(
+        r#"set -gx __phpvm_bin {phpvm_bin}
+function phpvm
+  if test "$argv[1]" = "use"; or test "$argv[1]" = "deactivate"
+    eval (env PHPVM_SHELL_INTEGRATION=1 $__phpvm_bin $argv)
+  else
+    $__phpvm_bin $argv
+  end
+end
+"#
+    );
+
+    if use_on_cd {
+        wrapper.push_str(
+            r#"
+function __phpvm_auto_use --on-variable PWD
+  if set -q PHPVM_VERSION
+    return
+  end
+  eval (env PHPVM_SHELL_INTEGRATION=1 $__phpvm_bin use --silent 2>/dev/null)
+end
+"#,
+        );
+    }
+
+    print!("{wrapper}");
     Ok(())
 }
 
@@ -521,17 +623,18 @@ pub fn show_info(spec: &str) -> Result<()> {
     };
 
     if let Some(metadata) = crate::runtime_metadata::RuntimeMetadata::read(&resolved)? {
-        println!("{:<12}{}", "PHP:", metadata.php);
-        println!("{:<12}{}", "Composer:", metadata.composer);
-        println!("{:<12}{}", "Profile:", metadata.active_profile);
+        output::heading(&format!("PHP {}", metadata.php));
+        output::label("PHP:", &metadata.php);
+        output::label("Composer:", &metadata.composer);
+        output::label("Profile:", &metadata.active_profile);
         if let Some(source) = &metadata.preset_source {
-            println!("{:<12}{}", "Preset:", source);
+            output::label("Preset:", source);
         }
         if !metadata.enabled_extensions.is_empty() {
-            println!();
-            println!("Extensions:");
+            output::blank();
+            output::info("Extensions:");
             for ext in &metadata.enabled_extensions {
-                println!("  {}", ext);
+                output::list_item_dim(ext);
             }
         }
         return Ok(());
@@ -551,26 +654,27 @@ pub fn show_info(spec: &str) -> Result<()> {
         let cfg = config::load_config(&project_dir)?;
         let default_profile = cfg.profile.as_deref().unwrap_or("minimal");
 
-        println!("{:<12}{}", "PHP:", e.php);
-        println!("{:<12}{}", "Composer:", e.composer);
-        println!("{:<12}{}", "Profile:", default_profile);
+        output::heading(&format!("PHP {}", e.php));
+        output::label("PHP:", &e.php);
+        output::label("Composer:", &e.composer);
+        output::label("Profile:", default_profile);
 
         if let Ok(enabled) =
             profile::enabled_extensions_for_preset(default_profile, &project_dir, None)
         {
             if !enabled.is_empty() {
-                println!();
-                println!("Extensions:");
+                output::blank();
+                output::info("Extensions:");
                 for ext in &enabled {
-                    println!("  {}", ext);
+                    output::list_item_dim(ext);
                 }
             }
         }
     } else {
-        // No manifest data available (stale/offline); report what we know.
-        println!("{:<12}{}", "PHP:", resolved);
-        println!("{:<12}unknown", "Composer:");
-        println!("{:<12}unknown", "Profile:");
+        output::heading(&format!("PHP {resolved}"));
+        output::label("PHP:", &resolved);
+        output::label("Composer:", "unknown");
+        output::label("Profile:", "unknown");
     }
 
     Ok(())

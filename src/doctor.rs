@@ -229,24 +229,38 @@ pub fn release_check_with_format(format: OutputFormat) -> Result<()> {
         "echo 'phpvm-ok\n';".to_string(),
     ];
 
+    let live = output::live_matrix_progress(format);
+    if live {
+        output::heading("Release Compatibility Check");
+        output::blank();
+    }
+
     let mut entries: Vec<MatrixEntry> = Vec::new();
     for v in &matrix {
-        match runner::run_silent(v, &check_cmd) {
-            Ok(run) => {
-                entries.push(MatrixEntry {
-                    php_version: run.resolved_version,
-                    status: RunStatus::Pass,
-                    output: None,
-                });
-            }
-            Err(e) => {
-                entries.push(MatrixEntry {
-                    php_version: v.clone(),
-                    status: RunStatus::Fail,
-                    output: Some(e.to_string()),
-                });
-            }
+        let spinner = if live {
+            Some(output::VersionSpinner::start(v))
+        } else {
+            None
+        };
+
+        let entry = match runner::run_silent(v, &check_cmd) {
+            Ok(run) => MatrixEntry {
+                php_version: run.resolved_version,
+                status: RunStatus::Pass,
+                output: None,
+            },
+            Err(e) => MatrixEntry {
+                php_version: v.clone(),
+                status: RunStatus::Fail,
+                output: Some(e.to_string()),
+            },
+        };
+
+        if let Some(spinner) = spinner {
+            spinner.finish(matches!(entry.status, RunStatus::Pass));
         }
+
+        entries.push(entry);
     }
 
     let overall = MatrixResult::compute_overall(&entries);
@@ -258,7 +272,7 @@ pub fn release_check_with_format(format: OutputFormat) -> Result<()> {
         overall,
     };
 
-    output::print_release_check_result(&result, format);
+    output::print_release_check_result(&result, format, live);
 
     if matches!(result.overall, RunStatus::Fail) {
         anyhow::bail!("Release check failed");

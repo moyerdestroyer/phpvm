@@ -11,6 +11,9 @@ mod profile_preset;
 mod providers;
 mod runner;
 mod runtime_metadata;
+mod shell_env;
+#[cfg(test)]
+mod testing;
 mod version;
 
 use anyhow::Result;
@@ -19,7 +22,13 @@ use clap::Parser;
 use crate::cli::Command;
 use crate::output::OutputFormat;
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(err) = run() {
+        output::fatal(&err);
+    }
+}
+
+fn run() -> Result<()> {
     let args = cli::Args::parse();
     let format = args.command.output_format();
 
@@ -61,13 +70,13 @@ fn main() -> Result<()> {
         Command::Ls | Command::Versions => version::list_installed()?,
         Command::LsRemote => version::list_remote()?,
         Command::Info { version } => version::show_info(&version)?,
-        Command::Use { version, profile } => {
-            if let Some(profile_name) = &profile {
-                profile::use_profile(profile_name, Some(&version))?;
-            }
-            version::activate(&version)?;
-        }
-        Command::Env { version } => version::print_env(version.as_deref())?,
+        Command::Use {
+            version,
+            profile,
+            silent,
+        } => version::run_use(version.as_deref(), profile.as_deref(), silent)?,
+        Command::Deactivate { silent, persist } => version::deactivate(silent, persist)?,
+        Command::Env { version, shell } => version::print_env(version.as_deref(), &shell)?,
         Command::Current => version::show_current()?,
     }
 

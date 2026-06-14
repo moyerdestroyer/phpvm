@@ -1,0 +1,14 @@
+---
+source: src/output.rs
+expression: "render_release_check_human(&sample_release_check_result(), false)"
+---
+Release Compatibility Check
+Detected:       laravel
+PHP Constraint: ^8.2
+
+Testing:
+8.3.23 PASS
+8.2.28 FAIL
+  runtime missing
+
+Result: RELEASE BLOCKED
