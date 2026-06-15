@@ -2,6 +2,9 @@
 
 PHPVM v2 manifests describe **one full runtime artifact per PHP version**. Profiles are ini presets applied after install — the authoritative user config is `.ini` files, not manifest extension lists.
 
+> Dynamic extension catalogs use manifest v3. See [manifest-v3.md](manifest-v3.md)
+> for the ZIP-style runtime bundle contract with `ext/` and `etc/conf.d/`.
+
 ## Schema
 
 ```json

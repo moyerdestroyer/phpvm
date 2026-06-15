@@ -457,11 +457,22 @@ pub fn apply_preset(
         profile_preset::resolve_preset(profile_name, project_dir, target, manifest, catalog)?;
 
     profile_preset::validate_preset_extensions(&preset.path, catalog)?;
-    profile_preset::activate_preset(target, &preset.path)?;
+    let enabled_extensions = if entry.is_dynamic() {
+        profile_preset::activate_dynamic_preset(target, &preset.path, entry)?
+    } else {
+        profile_preset::activate_preset(target, &preset.path)?;
+        profile_preset::parse_enabled_extensions_from_file(&preset.path)?
+    };
 
     let mut metadata = RuntimeMetadata::read(&entry.php)?
         .unwrap_or_else(|| RuntimeMetadata::from_install(entry, profile_name, &preset, catalog));
     metadata.update_active_preset(profile_name, &preset);
+    metadata.runtime_type = entry.runtime_type.clone();
+    metadata.abi = entry.abi.clone();
+    metadata.thread_safety = entry.thread_safety.clone();
+    metadata.extension_api = entry.extension_api.clone();
+    metadata.extension_catalog = entry.extensions.clone();
+    metadata.enabled_extensions = enabled_extensions;
     if metadata.available_extensions.is_empty() {
         metadata.available_extensions = catalog.to_vec();
     }
@@ -475,6 +486,7 @@ pub fn apply_preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{RuntimeExtension, RuntimeType};
 
     // ── archive_suffix ─────────────────────────────────────────────────
 
@@ -648,12 +660,19 @@ mod tests {
             php: "8.3.23".into(),
             composer: "2.9.2".into(),
             profile: None,
-            extensions: vec!["curl".into(), "mbstring".into()],
+            runtime_type: RuntimeType::Static,
+            abi: None,
+            thread_safety: None,
+            extension_api: None,
+            extensions: vec![
+                RuntimeExtension::from_name("curl".into()),
+                RuntimeExtension::from_name("mbstring".into()),
+            ],
             url: "https://example.com/php-8.3.23.tar.gz".into(),
             sha256: "00000000000000000000000000000000000000000000000000000000000000ab".into(),
             artifacts: None,
         };
-        let catalog = entry.extensions.clone();
+        let catalog = entry.extension_catalog();
 
         apply_preset(
             &target_path,
@@ -667,7 +686,8 @@ mod tests {
         let active_ini = crate::runtime_metadata::active_php_ini(&target_path);
         assert!(active_ini.exists());
         let content = fs::read_to_string(&active_ini)?;
-        assert!(content.contains("extension=curl"));
+        assert!(content.contains("; test preset"));
+        assert!(!content.contains("extension=curl"));
 
         let meta_path = target_path.join("metadata.json");
         assert!(meta_path.exists());

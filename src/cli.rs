@@ -127,6 +127,12 @@ pub enum Command {
         command: ProfileCommand,
     },
 
+    /// Manage loadable extensions for dynamic runtimes
+    Ext {
+        #[command(subcommand)]
+        command: ExtCommand,
+    },
+
     /// List installed PHP runtimes
     Ls,
 
@@ -201,6 +207,62 @@ pub enum ProfileCommand {
         /// Destination preset name
         dst: String,
         /// PHP version context for resolving the source preset
+        #[arg(long)]
+        version: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExtCommand {
+    /// List extensions for the active or selected runtime
+    List {
+        /// Show only extensions available in the runtime bundle
+        #[arg(long)]
+        available: bool,
+        /// Show only extensions currently enabled by profile/custom snippets
+        #[arg(long)]
+        enabled: bool,
+        /// PHP version context (defaults to active runtime)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Enable a bundled or installed loadable extension
+    Enable {
+        /// Extension name
+        name: String,
+        /// PHP version context (defaults to active runtime)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Disable a manually-enabled extension snippet
+    Disable {
+        /// Extension name
+        name: String,
+        /// PHP version context (defaults to active runtime)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Install a custom extension binary into the selected runtime
+    Install {
+        /// Local extension file path, archive path, or URL
+        source: String,
+        /// Extension name (defaults to file stem)
+        #[arg(long)]
+        name: Option<String>,
+        /// Load directive type: extension or zend_extension
+        #[arg(long, default_value = "extension", value_parser = ["extension", "zend_extension"])]
+        kind: String,
+        /// PHP version context (defaults to active runtime)
+        #[arg(long)]
+        version: Option<String>,
+    },
+
+    /// Print the selected runtime's extension directory
+    Path {
+        /// PHP version context (defaults to active runtime)
         #[arg(long)]
         version: Option<String>,
     },

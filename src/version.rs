@@ -228,10 +228,49 @@ pub fn resolve_specifier(specifier: &str, available: &[String]) -> Result<String
 // list_installed — show the user what they have locally
 // ---------------------------------------------------------------------------
 
+/// Resolve the active installed runtime version for display and default command context.
+///
+/// Persisted `phpvm use` config wins over a stale `PHPVM_VERSION` environment variable.
+pub fn resolve_active_version(installed: &[String]) -> Option<String> {
+    if installed.is_empty() {
+        return None;
+    }
+
+    if let Some(active) = config::get_current_version() {
+        if installed.iter().any(|v| v == &active) {
+            return Some(active);
+        }
+    }
+
+    if let Ok(active) = std::env::var("PHPVM_VERSION") {
+        if !active.is_empty() && installed.iter().any(|v| v == &active) {
+            return Some(active);
+        }
+    }
+
+    None
+}
+
+/// Resolve the active runtime, or an explicit version specifier.
+pub fn resolve_active_runtime(version_spec: Option<&str>) -> Result<String> {
+    let installed = runner::installed_versions()?;
+    if installed.is_empty() {
+        anyhow::bail!("No runtimes installed. Run `phpvm install <version>` first.");
+    }
+
+    if let Some(spec) = version_spec {
+        return resolve_specifier(spec, &installed);
+    }
+
+    resolve_active_version(&installed).ok_or_else(|| {
+        anyhow::anyhow!("No active PHP runtime. Pass --version or run `phpvm use <version>` first.")
+    })
+}
+
 /// List all installed PHP runtimes.
 ///
-/// The currently "active" runtime (from `PHPVM_VERSION` or the persisted `phpvm use`
-/// value) is marked with a leading `*`.
+/// The currently "active" runtime (persisted `phpvm use` value, then `PHPVM_VERSION`)
+/// is marked with a leading `*`.
 pub fn list_installed() -> Result<()> {
     let raw = runner::installed_versions()?;
     let mut versions: Vec<PhpVersion> = raw
@@ -398,24 +437,12 @@ pub fn composer_home_for(resolved: &str) -> Result<camino::Utf8PathBuf> {
 
 /// Show the currently active PHP version.
 ///
-/// Priority: live $PHPVM_VERSION env (current shell) > persisted from
-/// `phpvm use` > "none".
+/// Priority: persisted `phpvm use` value > live `PHPVM_VERSION` env > "none".
 pub fn show_current() -> Result<()> {
-    if let Ok(v) = std::env::var("PHPVM_VERSION") {
-        if !v.is_empty() {
-            println!("{}", v);
-            return Ok(());
-        }
-    }
-
-    if let Some(v) = config::get_current_version() {
-        // Only report it if the runtime is still present on disk.
-        if let Ok(installed) = runner::installed_versions() {
-            if installed.iter().any(|i| i == &v) {
-                println!("{}", v);
-                return Ok(());
-            }
-        }
+    let installed = runner::installed_versions()?;
+    if let Some(v) = resolve_active_version(&installed) {
+        println!("{}", v);
+        return Ok(());
     }
 
     println!("none");
@@ -626,6 +653,7 @@ pub fn show_info(spec: &str) -> Result<()> {
         output::heading(&format!("PHP {}", metadata.php));
         output::label("PHP:", &metadata.php);
         output::label("Composer:", &metadata.composer);
+        output::label("Runtime:", metadata.runtime_type.as_str());
         output::label("Profile:", &metadata.active_profile);
         if let Some(source) = &metadata.preset_source {
             output::label("Preset:", source);
@@ -727,31 +755,8 @@ fn filter_matching(available: &[String], major: u32, minor: u32) -> Vec<PhpVersi
 }
 
 /// Determine which installed version should be considered "current" for display in `ls`.
-///
-/// Matches `show_current`: only explicit activation via `phpvm use` counts.
-/// Resolution order (highest priority first):
-/// 1. The PHPVM_VERSION environment variable (set by `eval "$(phpvm use X)"`).
-/// 2. The persisted value written by `phpvm use` in any previous session.
 fn compute_current_version(installed: &[String]) -> Option<String> {
-    if installed.is_empty() {
-        return None;
-    }
-
-    // Highest priority: explicit activation via `phpvm use` in *this* shell (env var set by eval).
-    if let Ok(active) = std::env::var("PHPVM_VERSION") {
-        if !active.is_empty() && installed.iter().any(|v| v == &active) {
-            return Some(active);
-        }
-    }
-
-    // Next: the persisted value written by `phpvm use` in any previous session.
-    if let Some(active) = config::get_current_version() {
-        if installed.iter().any(|v| v == &active) {
-            return Some(active);
-        }
-    }
-
-    None
+    resolve_active_version(installed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,15 +1160,39 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn compute_current_version_honors_phpvm_version_env() {
+    fn compute_current_version_falls_back_to_phpvm_version_env() {
         let installed = vers(&["8.3.12", "8.2.27"]);
-        let saved = std::env::var("PHPVM_VERSION").ok();
+        let saved_env = std::env::var("PHPVM_VERSION").ok();
+        std::env::remove_var("PHPVM_VERSION");
         std::env::set_var("PHPVM_VERSION", "8.3.12");
         assert_eq!(
             compute_current_version(&installed),
             Some("8.3.12".to_string())
         );
-        match saved {
+        match saved_env {
+            Some(v) => std::env::set_var("PHPVM_VERSION", v),
+            None => std::env::remove_var("PHPVM_VERSION"),
+        }
+    }
+
+    #[test]
+    fn compute_current_version_prefers_persisted_config_over_stale_env() {
+        let installed = vers(&["8.3.31", "8.2.31"]);
+        let saved_env = std::env::var("PHPVM_VERSION").ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path().join(".phpvm");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), "current_version = \"8.3.31\"\n").unwrap();
+        std::env::set_var("PHPVM_HOME", home.as_os_str());
+        std::env::set_var("PHPVM_VERSION", "8.2.31");
+
+        assert_eq!(
+            compute_current_version(&installed),
+            Some("8.3.31".to_string())
+        );
+
+        std::env::remove_var("PHPVM_HOME");
+        match saved_env {
             Some(v) => std::env::set_var("PHPVM_VERSION", v),
             None => std::env::remove_var("PHPVM_VERSION"),
         }
@@ -1173,9 +1202,19 @@ mod tests {
     fn compute_current_version_ignores_uninstalled_env_version() {
         let installed = vers(&["8.3.12"]);
         let saved_env = std::env::var("PHPVM_VERSION").ok();
+        let saved_home = std::env::var_os("PHPVM_HOME");
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path().join(".phpvm");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("PHPVM_HOME", home.as_os_str());
+        std::env::remove_var("PHPVM_VERSION");
         std::env::set_var("PHPVM_VERSION", "7.4.33");
         let result = compute_current_version(&installed);
-        assert_ne!(result.as_deref(), Some("7.4.33"));
+        assert_eq!(result, None);
+        match saved_home {
+            Some(v) => std::env::set_var("PHPVM_HOME", v),
+            None => std::env::remove_var("PHPVM_HOME"),
+        }
         match saved_env {
             Some(v) => std::env::set_var("PHPVM_VERSION", v),
             None => std::env::remove_var("PHPVM_VERSION"),

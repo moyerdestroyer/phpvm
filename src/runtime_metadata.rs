@@ -5,7 +5,7 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::config;
-use crate::manifest::ManifestEntry;
+use crate::manifest::{ManifestEntry, RuntimeExtension, RuntimeType};
 use crate::profile_preset::{self, PresetSource};
 
 /// Metadata written alongside an installed runtime.
@@ -19,7 +19,20 @@ pub struct RuntimeMetadata {
     /// Path or source label for the active preset.
     #[serde(default)]
     pub preset_source: Option<String>,
-    /// Extensions compiled into the full binary (from manifest).
+    /// Runtime packaging model.
+    #[serde(default)]
+    pub runtime_type: RuntimeType,
+    /// Extension ABI metadata for dynamic runtimes.
+    #[serde(default)]
+    pub abi: Option<String>,
+    #[serde(default)]
+    pub thread_safety: Option<String>,
+    #[serde(default)]
+    pub extension_api: Option<String>,
+    /// Extension descriptors available in this runtime.
+    #[serde(default)]
+    pub extension_catalog: Vec<RuntimeExtension>,
+    /// Extension names available in the runtime (legacy-friendly summary).
     #[serde(default)]
     pub available_extensions: Vec<String>,
     /// Extensions currently enabled via the active profile ini.
@@ -67,6 +80,11 @@ impl RuntimeMetadata {
             composer: entry.composer.clone(),
             active_profile: profile_name.to_string(),
             preset_source: Some(format_preset_source(preset)),
+            runtime_type: entry.runtime_type.clone(),
+            abi: entry.abi.clone(),
+            thread_safety: entry.thread_safety.clone(),
+            extension_api: entry.extension_api.clone(),
+            extension_catalog: entry.extensions.clone(),
             available_extensions: catalog.to_vec(),
             enabled_extensions: enabled,
             installed_at: Some(iso8601_now()),
@@ -136,6 +154,21 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// Return the path to the active php.ini for a runtime.
 pub fn active_php_ini(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
     runtime_dir.join("etc").join("php.ini")
+}
+
+/// Return the additional ini scan directory for generated profile/extension snippets.
+pub fn conf_d_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
+    runtime_dir.join("etc").join("conf.d")
+}
+
+/// Return the bundled extension directory for a runtime.
+pub fn extension_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
+    runtime_dir.join("ext")
+}
+
+/// Return the custom extension directory for a runtime.
+pub fn custom_extension_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
+    extension_dir(runtime_dir).join("custom")
 }
 
 /// Return the directory holding profile ini presets.

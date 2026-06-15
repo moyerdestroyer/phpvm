@@ -248,7 +248,7 @@ fn phpvm_deactivate_emits_path_cleanup() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "unset PHPVM_VERSION COMPOSER_HOME PHPRC",
+            "unset PHPVM_VERSION COMPOSER_HOME PHPRC PHP_INI_SCAN_DIR",
         ))
         .stdout(predicate::str::contains("hash -r"));
 }

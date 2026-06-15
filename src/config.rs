@@ -189,6 +189,7 @@ fn merge_project_config(base: &mut Config, project: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::env_lock::LOCK as ENV_LOCK;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -209,13 +210,18 @@ mod tests {
 
     #[test]
     fn use_on_cd_enabled_reads_global_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = TempDir::new().unwrap();
+        let prev = std::env::var("PHPVM_HOME").ok();
         std::env::set_var("PHPVM_HOME", dir.path());
         write_file(&dir, "config.toml", "use_on_cd = true\n");
 
         assert!(use_on_cd_enabled());
 
-        std::env::remove_var("PHPVM_HOME");
+        match prev {
+            Some(v) => std::env::set_var("PHPVM_HOME", v),
+            None => std::env::remove_var("PHPVM_HOME"),
+        }
     }
 
     #[test]
@@ -366,6 +372,7 @@ profile = "wordpress"
 
     #[test]
     fn load_config_merges_project_over_global() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let home = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
 

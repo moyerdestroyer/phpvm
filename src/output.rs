@@ -209,12 +209,17 @@ pub fn blank() {
 
 /// Print a fatal error to stderr and exit with code 1.
 pub fn fatal(err: &anyhow::Error) -> ! {
+    fatal_with_code(err, 1);
+}
+
+/// Print a fatal error to stderr and exit with the given code.
+pub fn fatal_with_code(err: &anyhow::Error, code: i32) -> ! {
     eprintln!(
         "{} {:#}",
         styled_if("error:", |p| style(p).red().bold()),
         err
     );
-    std::process::exit(1);
+    std::process::exit(code);
 }
 
 // ---------------------------------------------------------------------------

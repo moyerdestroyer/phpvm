@@ -100,6 +100,9 @@ pub fn build_activation_snippet(resolved: &str, runtime_path: &Utf8Path) -> Resu
     let phprc_export = phprc_value(runtime_path)
         .map(|dir| format!("export PHPRC={}\n", shell_quote(&dir)))
         .unwrap_or_default();
+    let scan_dir_export = php_ini_scan_dir_value(runtime_path)
+        .map(|dir| format!("export PHP_INI_SCAN_DIR={}\n", shell_quote(&dir)))
+        .unwrap_or_default();
 
     Ok(format!(
         r#"export PHPVM_VERSION={}
@@ -132,14 +135,15 @@ unset __phpvm_runtime_bin __phpvm_composer_bin __phpvm_runtimes_dir
 unset __phpvm_composer_homes_dir __phpvm_old_path __phpvm_new_path
 unset __phpvm_old_ifs __phpvm_had_noglob __phpvm_entry
 hash -r 2>/dev/null || true
-{}"#,
+{}{}"#,
         shell_quote(resolved),
         shell_quote(composer_home.as_str()),
         shell_quote(bin_dir.as_str()),
         shell_quote(global_bin.as_str()),
         shell_quote(runtimes_dir.as_str()),
         shell_quote(composer_homes_dir.as_str()),
-        phprc_export
+        phprc_export,
+        scan_dir_export
     ))
 }
 
@@ -171,7 +175,7 @@ if [ "$__phpvm_had_noglob" = 0 ]; then
   set +f
 fi
 export PATH="${{__phpvm_new_path:-}}"
-unset PHPVM_VERSION COMPOSER_HOME PHPRC
+unset PHPVM_VERSION COMPOSER_HOME PHPRC PHP_INI_SCAN_DIR
 unset __phpvm_runtimes_dir __phpvm_composer_homes_dir __phpvm_old_path
 unset __phpvm_new_path __phpvm_old_ifs __phpvm_had_noglob __phpvm_entry
 hash -r 2>/dev/null || true
@@ -237,6 +241,15 @@ fn phprc_value(runtime_path: &Utf8Path) -> Option<String> {
     let php_ini = crate::runtime_metadata::active_php_ini(runtime_path);
     if php_ini.exists() {
         php_ini.parent().map(|dir| dir.to_string())
+    } else {
+        None
+    }
+}
+
+fn php_ini_scan_dir_value(runtime_path: &Utf8Path) -> Option<String> {
+    let conf_d = crate::runtime_metadata::conf_d_dir(runtime_path);
+    if conf_d.exists() {
+        Some(conf_d.to_string())
     } else {
         None
     }
@@ -344,7 +357,7 @@ mod tests {
         std::env::set_var("PHPVM_HOME", home.as_str());
 
         let snippet = build_deactivation_snippet().unwrap();
-        assert!(snippet.contains("unset PHPVM_VERSION COMPOSER_HOME PHPRC"));
+        assert!(snippet.contains("unset PHPVM_VERSION COMPOSER_HOME PHPRC PHP_INI_SCAN_DIR"));
         assert!(snippet.contains("hash -r"));
     }
 }

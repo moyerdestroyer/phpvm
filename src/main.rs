@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod doctor;
+mod extension;
 mod install;
 mod manifest;
 mod matrix;
@@ -24,6 +25,9 @@ use crate::output::OutputFormat;
 
 fn main() {
     if let Err(err) = run() {
+        if let Some(exit) = err.downcast_ref::<runner::CommandExit>() {
+            output::fatal_with_code(&err, exit.code);
+        }
         output::fatal(&err);
     }
 }
@@ -66,6 +70,26 @@ fn run() -> Result<()> {
             cli::ProfileCommand::Fork { src, dst, version } => {
                 profile::fork_preset(&src, &dst, version.as_deref())?
             }
+        },
+        Command::Ext { command } => match command {
+            cli::ExtCommand::List {
+                available,
+                enabled,
+                version,
+            } => extension::list(version.as_deref(), available, enabled)?,
+            cli::ExtCommand::Enable { name, version } => {
+                extension::enable(&name, version.as_deref())?
+            }
+            cli::ExtCommand::Disable { name, version } => {
+                extension::disable(&name, version.as_deref())?
+            }
+            cli::ExtCommand::Install {
+                source,
+                name,
+                kind,
+                version,
+            } => extension::install(&source, name.as_deref(), &kind, version.as_deref())?,
+            cli::ExtCommand::Path { version } => extension::path(version.as_deref())?,
         },
         Command::Ls | Command::Versions => version::list_installed()?,
         Command::LsRemote => version::list_remote()?,

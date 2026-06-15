@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::config;
-use crate::manifest::{self, Manifest};
+use crate::manifest::{self, Manifest, RuntimeExtension};
 use crate::output::{self, OutputFormat};
 use crate::profile_preset::{self, ListedPreset};
 use crate::providers;
@@ -26,11 +26,14 @@ pub fn wordpress_template() -> ProfileTemplate {
             "curl".to_string(),
             "dom".to_string(),
             "gd".to_string(),
+            "iconv".to_string(),
             "intl".to_string(),
             "mbstring".to_string(),
             "mysqli".to_string(),
             "openssl".to_string(),
             "pdo_mysql".to_string(),
+            "session".to_string(),
+            "simplexml".to_string(),
             "xml".to_string(),
             "zip".to_string(),
         ],
@@ -43,10 +46,13 @@ pub fn laravel_template() -> ProfileTemplate {
         name: "laravel".to_string(),
         extensions: vec![
             "curl".to_string(),
+            "iconv".to_string(),
             "intl".to_string(),
             "mbstring".to_string(),
             "openssl".to_string(),
             "pdo_mysql".to_string(),
+            "session".to_string(),
+            "simplexml".to_string(),
             "tokenizer".to_string(),
             "xml".to_string(),
             "zip".to_string(),
@@ -169,7 +175,19 @@ fn manifest_entry_for_runtime(
         php: metadata.php,
         composer: metadata.composer,
         profile: None,
-        extensions: catalog.to_vec(),
+        runtime_type: metadata.runtime_type,
+        abi: metadata.abi,
+        thread_safety: metadata.thread_safety,
+        extension_api: metadata.extension_api,
+        extensions: if metadata.extension_catalog.is_empty() {
+            catalog
+                .iter()
+                .cloned()
+                .map(RuntimeExtension::from_name)
+                .collect()
+        } else {
+            metadata.extension_catalog
+        },
         url: String::new(),
         sha256: String::new(),
         artifacts: None,
@@ -177,28 +195,7 @@ fn manifest_entry_for_runtime(
 }
 
 fn resolve_target_runtime(version_spec: Option<&str>) -> Result<String> {
-    let installed = crate::runner::installed_versions()?;
-    if installed.is_empty() {
-        anyhow::bail!("No runtimes installed. Run `phpvm install <version>` first.");
-    }
-
-    if let Some(spec) = version_spec {
-        return crate::version::resolve_specifier(spec, &installed);
-    }
-
-    if let Ok(active) = std::env::var("PHPVM_VERSION") {
-        if !active.is_empty() && installed.iter().any(|v| v == &active) {
-            return Ok(active);
-        }
-    }
-
-    if let Some(active) = config::get_current_version() {
-        if installed.iter().any(|v| v == &active) {
-            return Ok(active);
-        }
-    }
-
-    anyhow::bail!("No active PHP runtime. Pass --version or run `phpvm use <version>` first.")
+    crate::version::resolve_active_runtime(version_spec)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,14 +422,8 @@ fn resolve_runtime_dir(version_spec: Option<&str>) -> Result<Option<camino::Utf8
 
     let resolved = if let Some(spec) = version_spec {
         Some(crate::version::resolve_specifier(spec, &installed)?)
-    } else if let Ok(active) = std::env::var("PHPVM_VERSION") {
-        if !active.is_empty() && installed.iter().any(|v| v == &active) {
-            Some(active)
-        } else {
-            config::get_current_version().filter(|v| installed.iter().any(|i| i == v))
-        }
     } else {
-        config::get_current_version().filter(|v| installed.iter().any(|i| i == v))
+        crate::version::resolve_active_version(&installed)
     };
 
     let runtimes_dir = config::runtimes_dir()?;
@@ -448,7 +439,9 @@ mod tests {
         let p = wordpress_template();
         assert_eq!(p.name, "wordpress");
         assert!(p.extensions.contains(&"mysqli".to_string()));
-        assert_eq!(p.extensions.len(), 10);
+        assert!(p.extensions.contains(&"session".to_string()));
+        assert!(p.extensions.contains(&"simplexml".to_string()));
+        assert_eq!(p.extensions.len(), 13);
     }
 
     #[test]

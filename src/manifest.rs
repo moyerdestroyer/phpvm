@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config;
@@ -15,6 +15,99 @@ use crate::profile::{self, ProfileTemplate};
 pub struct ManifestArtifact {
     pub url: String,
     pub sha256: String,
+}
+
+/// Runtime packaging mode.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeType {
+    #[default]
+    Static,
+    Dynamic,
+}
+
+impl RuntimeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
+fn default_extension_type() -> String {
+    "extension".to_string()
+}
+
+fn default_bundled() -> bool {
+    true
+}
+
+/// A loadable or compiled extension advertised by a runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeExtension {
+    pub name: String,
+    #[serde(default = "default_extension_type", rename = "type")]
+    pub extension_type: String,
+    #[serde(default = "default_bundled")]
+    pub bundled: bool,
+    #[serde(default, rename = "default")]
+    pub default_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+impl RuntimeExtension {
+    pub fn from_name(name: String) -> Self {
+        Self {
+            name,
+            extension_type: default_extension_type(),
+            bundled: true,
+            default_enabled: false,
+            file: None,
+        }
+    }
+
+    pub fn load_directive(&self) -> &'static str {
+        if self.extension_type == "zend_extension" {
+            "zend_extension"
+        } else {
+            "extension"
+        }
+    }
+
+    pub fn load_target(&self) -> String {
+        self.file.clone().unwrap_or_else(|| {
+            if cfg!(windows) {
+                format!("{}.dll", self.name)
+            } else {
+                format!("{}.so", self.name)
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RuntimeExtensionInput {
+    Name(String),
+    Detail(RuntimeExtension),
+}
+
+fn deserialize_extensions<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<RuntimeExtension>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let inputs = Vec::<RuntimeExtensionInput>::deserialize(deserializer)?;
+    Ok(inputs
+        .into_iter()
+        .map(|input| match input {
+            RuntimeExtensionInput::Name(name) => RuntimeExtension::from_name(name),
+            RuntimeExtensionInput::Detail(detail) => detail,
+        })
+        .collect())
 }
 
 /// A single runtime entry from the remote manifest.
@@ -30,9 +123,21 @@ pub struct ManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 
-    /// Extensions compiled into the full binary (manifest v2).
+    /// Runtime packaging model. v2 manifests default to static.
     #[serde(default)]
-    pub extensions: Vec<String>,
+    pub runtime_type: RuntimeType,
+
+    /// PHP extension ABI metadata for dynamic runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_safety: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_api: Option<String>,
+
+    /// Extensions available in the runtime.
+    #[serde(default, deserialize_with = "deserialize_extensions")]
+    pub extensions: Vec<RuntimeExtension>,
 
     /// Download URL for the runtime archive (manifest v2; empty when using `artifacts`).
     #[serde(default)]
@@ -50,6 +155,10 @@ pub struct ManifestEntry {
 /// The full manifest: profile presets and available runtimes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Manifest schema version. v2/v2.1 are static full binaries; v3 is dynamic-capable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+
     /// Named extension presets for starter ini seeding (not user config).
     #[serde(default)]
     pub profiles: Vec<ProfileTemplate>,
@@ -94,7 +203,7 @@ impl ManifestEntry {
     /// Extensions available in the installed binary for this runtime.
     pub fn extension_catalog(&self) -> Vec<String> {
         if !self.extensions.is_empty() {
-            return self.extensions.clone();
+            return self.extensions.iter().map(|ext| ext.name.clone()).collect();
         }
 
         // v1 fallback: union builtins when the manifest has not published catalogs yet.
@@ -103,6 +212,14 @@ impl ManifestEntry {
             .and_then(profile::builtin_template)
             .map(|p| p.extensions)
             .unwrap_or_default()
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.runtime_type == RuntimeType::Dynamic
+    }
+
+    pub fn extension_detail(&self, name: &str) -> Option<&RuntimeExtension> {
+        self.extensions.iter().find(|ext| ext.name == name)
     }
 }
 
@@ -362,19 +479,19 @@ fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<Manif
         }
     }
 
-    let mut extensions: Vec<String> = Vec::new();
+    let mut extensions: Vec<RuntimeExtension> = Vec::new();
     for entry in &entries {
         if !entry.extensions.is_empty() {
             for ext in &entry.extensions {
-                if !extensions.contains(ext) {
+                if !extensions.iter().any(|existing| existing.name == ext.name) {
                     extensions.push(ext.clone());
                 }
             }
         } else if let Some(profile_name) = entry.profile.as_deref() {
             if let Some(p) = profile::builtin_template(profile_name) {
-                for ext in p.extensions {
-                    if !extensions.contains(&ext) {
-                        extensions.push(ext);
+                for name in p.extensions {
+                    if !extensions.iter().any(|existing| existing.name == name) {
+                        extensions.push(RuntimeExtension::from_name(name));
                     }
                 }
             }
@@ -390,6 +507,10 @@ fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<Manif
         php: php.to_string(),
         composer: base.composer,
         profile: None,
+        runtime_type: base.runtime_type,
+        abi: base.abi,
+        thread_safety: base.thread_safety,
+        extension_api: base.extension_api,
         extensions,
         url: base.url,
         sha256: base.sha256,
@@ -615,14 +736,14 @@ mod tests {
         assert_eq!(m.runtimes.len(), 1);
         assert_eq!(m.profiles.len(), 3);
         let entry = m.find("8.3.23").unwrap();
-        assert!(entry.extensions.contains(&"tokenizer".to_string()));
+        assert!(entry.extension_catalog().contains(&"tokenizer".to_string()));
     }
 
     #[test]
     fn v1_wordpress_entry_gains_extension_catalog() {
         let m = fixture_v1();
         let entry = m.find("8.2.0").unwrap();
-        assert!(entry.extensions.contains(&"mysqli".to_string()));
+        assert!(entry.extension_catalog().contains(&"mysqli".to_string()));
     }
 
     #[test]

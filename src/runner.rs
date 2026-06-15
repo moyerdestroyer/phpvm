@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -7,6 +8,24 @@ use camino::Utf8PathBuf;
 use crate::config;
 use crate::output;
 use crate::runtime_metadata;
+
+// ---------------------------------------------------------------------------
+// Exit code propagation
+// ---------------------------------------------------------------------------
+
+/// Child process exited with a non-zero status. Propagated to the CLI exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandExit {
+    pub code: i32,
+}
+
+impl fmt::Display for CommandExit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Command exited with status {}", self.code)
+    }
+}
+
+impl std::error::Error for CommandExit {}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,6 +49,10 @@ fn apply_runtime_env(cmd: &mut Command, runtime_path: &Utf8PathBuf, resolved: &s
         .filter(|p| p.exists())
     {
         cmd.env("PHPRC", etc_dir.as_str());
+    }
+    let scan_dir = runtime_metadata::conf_d_dir(runtime_path);
+    if scan_dir.exists() {
+        cmd.env("PHP_INI_SCAN_DIR", scan_dir.as_str());
     }
 
     Ok(())
@@ -158,6 +181,9 @@ pub fn run(version: &str, command: &[String]) -> Result<()> {
         .context("Failed to execute command")?;
 
     if !status.success() {
+        if let Some(code) = status.code() {
+            return Err(CommandExit { code }.into());
+        }
         bail!("{}", status_message(status));
     }
     Ok(())
@@ -353,6 +379,12 @@ mod tests {
         if let Ok(out) = output {
             assert_eq!(status_message(out.status), "Command exited with status 0");
         }
+    }
+
+    #[test]
+    fn command_exit_display_matches_issue_format() {
+        let exit = CommandExit { code: 42 };
+        assert_eq!(exit.to_string(), "Command exited with status 42");
     }
 
     #[test]
