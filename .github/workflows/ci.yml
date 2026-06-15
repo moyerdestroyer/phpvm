@@ -28,3 +28,6 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
+      - name: install.sh self-tests
+        run: PHPVM_INSTALL_SELF_TEST=1 bash install.sh

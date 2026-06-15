@@ -14,12 +14,9 @@ Install and update are the same command. Re-running replaces the CLI binary; run
 curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 ```
 
-Installs to `~/.local/bin/phpvm` (override with `PHPVM_INSTALL_DIR`). Supports Linux x86_64 and macOS (Intel + Apple Silicon). Needs only `curl`, `tar`, and `sha256sum`/`shasum`.
+Installs to `~/.local/bin/phpvm` (override with `PHPVM_INSTALL_DIR`). Supports Linux x86_64 and macOS (Intel + Apple Silicon). Needs only `curl`, `tar`, and `sha256sum`/`shasum`. Always fetches the latest published release.
 
 ```bash
-# Pin a version
-curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.2.0 bash
-
 # Build from source (Rust)
 cargo install --git https://github.com/moyerdestroyer/phpvm
 ```

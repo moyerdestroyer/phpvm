@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 #
 # Advanced:
-#   PHPVM_VERSION=0.1.0 PHPVM_INSTALL_DIR=$HOME/bin bash install.sh
+#   PHPVM_INSTALL_VERSION=0.1.0 PHPVM_INSTALL_DIR=$HOME/bin bash install.sh
 #   PHPVM_UNINSTALL=1 bash install.sh
 #   PHPVM_MODIFY_SHELL=1 curl ... | bash  # add shell integration to rc without prompting
 #   PHPVM_MODIFY_SHELL=0 curl ... | bash  # never modify shell rc (manual hint only)
@@ -19,7 +19,6 @@ set -euo pipefail
 REPO="moyerdestroyer/phpvm"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 INSTALL_DIR="${PHPVM_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
-VERSION="${PHPVM_VERSION:-}"
 UNINSTALL="${PHPVM_UNINSTALL:-}"
 MODIFY_SHELL="${PHPVM_MODIFY_SHELL:-${PHPVM_MODIFY_PATH:-}}"
 
@@ -78,12 +77,21 @@ detect_target() {
   esac
 }
 
+# Resolve which phpvm CLI version to install. Empty means "latest from GitHub".
+# Uses PHPVM_INSTALL_VERSION only. Do not read PHPVM_VERSION — that is the active
+# PHP runtime set by phpvm shell integration (e.g. 8.3.31).
+resolve_install_version() {
+  if [[ -n "${PHPVM_INSTALL_VERSION:-}" ]]; then
+    echo "${PHPVM_INSTALL_VERSION}"
+  fi
+}
+
 # Return the tag (e.g. v0.1.0). If VERSION provided, ensure it has a leading v for the tag.
 resolve_tag() {
   local v="$1"
   if [[ -z "$v" ]]; then
     if [[ -n "${TEST_BASE}" ]]; then
-      err "When using PHPVM_TEST_DOWNLOAD_BASE you must also set PHPVM_VERSION (the script will not call the GitHub API in test mode)."
+      err "When using PHPVM_TEST_DOWNLOAD_BASE you must also set PHPVM_INSTALL_VERSION (the script will not call the GitHub API in test mode)."
     fi
     # Discover latest from GitHub API (no jq dependency).
     local api_url="https://api.github.com/repos/${REPO}/releases/latest"
@@ -91,7 +99,7 @@ resolve_tag() {
     # Some environments have very old curl; --fail --silent --show-error keeps output clean on error.
     tag="$(curl -fsSL "$api_url" | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
     if [[ -z "$tag" ]]; then
-      err "Failed to determine latest version from GitHub. Set PHPVM_VERSION explicitly or check https://github.com/${REPO}/releases"
+      err "Failed to determine latest version from GitHub. Set PHPVM_INSTALL_VERSION explicitly or check https://github.com/${REPO}/releases"
     fi
     echo "$tag"
   else
@@ -119,7 +127,7 @@ asset_urls() {
 
   if [[ -n "$TEST_BASE" ]]; then
     # Testing hook (used by `cargo test` style verification and CI of the installer).
-    # Caller must also supply PHPVM_VERSION. The values are treated as filesystem paths.
+    # Caller must also supply PHPVM_INSTALL_VERSION. The values are treated as filesystem paths.
     echo "${TEST_BASE}/phpvm-${ver}-${target}.tar.gz"
     echo "${TEST_BASE}/phpvm-${ver}-${target}.tar.gz.sha256"
     return
@@ -481,8 +489,11 @@ main() {
     err "Detected target '${target}' is not yet supported by releases. Supported: ${SUPPORTED_TARGETS[*]}. See https://github.com/${REPO}/releases for manual downloads."
   fi
 
+  local version
+  version="$(resolve_install_version)"
+
   local tag
-  tag="$(resolve_tag "$VERSION")"
+  tag="$(resolve_tag "$version")"
   local ver
   ver="$(bare_version "$tag")"
 
@@ -531,8 +542,50 @@ main() {
 
   configure_shell_integration "$installed" "$INSTALL_DIR"
 
-  info "To update later, re-run the same curl | bash command (or set PHPVM_VERSION)."
+  info "To update later, re-run the same curl | bash command."
   info "To uninstall: PHPVM_UNINSTALL=1 bash install.sh  (or simply rm ${INSTALL_DIR}/phpvm)"
 }
+
+run_self_tests() {
+  local failed=0
+
+  assert_eq() {
+    local name="$1"
+    local expected="$2"
+    local actual="$3"
+    if [[ "$expected" != "$actual" ]]; then
+      echo "FAIL: ${name}: expected '${expected}', got '${actual}'" >&2
+      failed=1
+    fi
+  }
+
+  assert_install_version() {
+    local name="$1"
+    local expected="$2"
+    local install_ver="$3"
+    local runtime_ver="$4"
+    local actual
+    actual="$(
+      PHPVM_INSTALL_VERSION="$install_ver" PHPVM_VERSION="$runtime_ver" resolve_install_version
+    )"
+    assert_eq "$name" "$expected" "$actual"
+  }
+
+  assert_install_version "defaults to latest" "" "" ""
+  assert_install_version "explicit install version" "0.2.0" "0.2.0" ""
+  assert_install_version "ignores PHPVM_VERSION runtime env" "" "" "8.3.31"
+
+  if [[ $failed -eq 0 ]]; then
+    echo "install.sh self-tests passed"
+  else
+    echo "install.sh self-tests failed" >&2
+    exit 1
+  fi
+}
+
+if [[ "${PHPVM_INSTALL_SELF_TEST:-}" == "1" ]]; then
+  run_self_tests
+  exit 0
+fi
 
 main "$@"
