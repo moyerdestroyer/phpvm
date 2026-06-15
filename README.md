@@ -18,7 +18,7 @@ Installs to `~/.local/bin/phpvm` (override with `PHPVM_INSTALL_DIR`). Supports L
 
 ```bash
 # Pin a version
-curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.1.1 bash
+curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | PHPVM_VERSION=0.2.0 bash
 
 # Build from source (Rust)
 cargo install --git https://github.com/moyerdestroyer/phpvm

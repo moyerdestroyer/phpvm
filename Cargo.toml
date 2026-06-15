@@ -1,6 +1,6 @@
 [package]
 name = "phpvm"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "PHP Compatibility Manager — test and run PHP applications across multiple runtimes"
 license = "MIT OR Apache-2.0"
