@@ -435,20 +435,6 @@ pub fn composer_home_for(resolved: &str) -> Result<camino::Utf8PathBuf> {
     Ok(homes_dir.join(format!("{}.{}", v.major, v.minor)))
 }
 
-/// Show the currently active PHP version.
-///
-/// Priority: persisted `phpvm use` value > live `PHPVM_VERSION` env > "none".
-pub fn show_current() -> Result<()> {
-    let installed = runner::installed_versions()?;
-    if let Some(v) = resolve_active_version(&installed) {
-        println!("{}", v);
-        return Ok(());
-    }
-
-    println!("none");
-    Ok(())
-}
-
 /// Print shell integration for `phpvm env`.
 ///
 /// Output is designed to be eval'ed, typically once from your shell rc:

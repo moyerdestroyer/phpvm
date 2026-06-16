@@ -183,6 +183,13 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         ));
     }
 
+    // Best-effort runtime verification for the static model (and legacy).
+    // Determines a candidate version from persisted use / installed, then execs
+    // its bin/php + bin/composer directly and checks php -m against the manifest
+    // catalog. Never falls back to host PHP.
+    let (rt_version, rt_ok, rt_php_v, rt_missing, rt_extras) =
+        verify_runtime(mf.as_ref(), profile_name.as_deref(), &enabled_extensions);
+
     let result = DoctorResult {
         project_type,
         php_constraint,
@@ -190,10 +197,143 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         required_extensions,
         missing_extensions,
         recommended_matrix,
+        runtime_version: rt_version,
+        runtime_ok: rt_ok,
+        runtime_php_version: rt_php_v,
+        missing_catalog_extensions: rt_missing,
+        profile_extras_not_in_binary: rt_extras,
     };
 
     output::print_doctor_result(&result, format);
     Ok(())
+}
+
+/// Attempt to locate an active or default installed runtime and perform basic
+/// health + catalog checks. Returns tuple fields suitable for DoctorResult.
+/// Failures are non-fatal (doctor still reports project info).
+#[allow(clippy::type_complexity)]
+fn verify_runtime(
+    mf: Option<&crate::manifest::Manifest>,
+    _profile: Option<&str>,
+    enabled_from_profile: &[String],
+) -> (
+    Option<String>,
+    Option<bool>,
+    Option<String>,
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+) {
+    use std::process::Command;
+
+    // Pick a version: prefer the globally persisted one, then resolve_active on
+    // installed list, else first installed (best effort, no hard fail).
+    let installed = crate::runner::installed_versions().unwrap_or_default();
+    let candidate = crate::config::get_current_version()
+        .or_else(|| crate::version::resolve_active_version(&installed))
+        .or_else(|| installed.first().cloned());
+
+    let Some(ver) = candidate else {
+        return (None, None, None, None, None);
+    };
+
+    let runtimes = match crate::config::runtimes_dir() {
+        Ok(d) => d,
+        Err(_) => return (Some(ver), Some(false), None, None, None),
+    };
+    let rt_dir = runtimes.join(&ver);
+    if !rt_dir.exists() {
+        return (Some(ver), Some(false), None, None, None);
+    }
+
+    let bin_name = if cfg!(windows) { "php.exe" } else { "php" };
+    let php_bin = rt_dir.join("bin").join(bin_name);
+    if !php_bin.exists() {
+        return (Some(ver.clone()), Some(false), None, None, None);
+    }
+
+    // php -v
+    let v_out = Command::new(&php_bin).arg("-v").output();
+    let (php_v_line, v_ok) = match v_out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let first = s.lines().next().unwrap_or("").trim().to_string();
+            (Some(first), true)
+        }
+        _ => (None, false),
+    };
+
+    // composer -V (best effort; co-located or in bin)
+    let comp_name = if cfg!(windows) {
+        "composer.exe"
+    } else {
+        "composer"
+    };
+    let comp_bin = rt_dir.join("bin").join(comp_name);
+    let comp_ok = if comp_bin.exists() {
+        Command::new(&comp_bin)
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // php -m
+    let m_out = Command::new(&php_bin).arg("-m").output();
+    let modules: Vec<String> = match m_out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty() && !l.starts_with('['))
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // Catalog from manifest (preferred) or fall back to empty.
+    let catalog: Vec<String> = mf
+        .and_then(|m| m.find(&ver))
+        .map(|e| e.extension_catalog())
+        .unwrap_or_default();
+
+    let missing_cat: Vec<String> = catalog
+        .iter()
+        .filter(|c| {
+            !modules
+                .iter()
+                .any(|m| m == *c || m.contains(&c.to_ascii_lowercase()))
+        })
+        .cloned()
+        .collect();
+
+    // Profile-declared things not visible in -m (xdebug etc for static debug profiles)
+    let profile_extras: Vec<String> = enabled_from_profile
+        .iter()
+        .filter(|e| {
+            let low = e.to_ascii_lowercase();
+            !modules.iter().any(|m| m == &low || m.contains(&low))
+                && !catalog.iter().any(|c| c.eq_ignore_ascii_case(e))
+        })
+        .cloned()
+        .collect();
+
+    let overall_ok = v_ok && comp_ok && missing_cat.is_empty();
+
+    (
+        Some(ver),
+        Some(overall_ok),
+        php_v_line,
+        if missing_cat.is_empty() {
+            None
+        } else {
+            Some(missing_cat)
+        },
+        if profile_extras.is_empty() {
+            None
+        } else {
+            Some(profile_extras)
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

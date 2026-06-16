@@ -87,7 +87,8 @@ pub fn builtin_template(name: &str) -> Option<ProfileTemplate> {
 // Profile switching
 // ---------------------------------------------------------------------------
 
-/// Switch the active ini preset for an installed runtime.
+/// Switch the active profile preset for an installed runtime (updates metadata
+/// and, for static runtimes, the phpvm-managed user ini outside the runtime tree).
 pub fn use_profile(profile_name: &str, version_spec: Option<&str>) -> Result<()> {
     let project_dir = config::current_project_dir()?;
     let cfg = config::load_config(&project_dir)?;
@@ -232,41 +233,6 @@ fn print_presets_human(presets: &[ListedPreset]) {
     }
 }
 
-/// Print the resolved path for a profile preset.
-pub fn preset_path(name: Option<&str>, version_spec: Option<&str>) -> Result<()> {
-    let project_dir = config::current_project_dir()?;
-    let cfg = config::load_config(&project_dir)?;
-    let mf = manifest::fetch_from_config(&cfg).ok();
-
-    let preset_name = match name {
-        Some(n) => n.to_string(),
-        None => default_preset_name(&project_dir, version_spec)?,
-    };
-
-    let runtime_dir = resolve_runtime_dir(version_spec)?;
-    let catalog = runtime_dir
-        .as_ref()
-        .and_then(|dir| {
-            dir.file_name()
-                .map(|n| n.to_string())
-                .and_then(|v| runtime_extension_catalog(&v, mf.as_ref()).ok())
-        })
-        .unwrap_or_default();
-
-    let resolved = profile_preset::resolve_preset(
-        &preset_name,
-        &project_dir,
-        runtime_dir
-            .as_deref()
-            .unwrap_or_else(|| camino::Utf8Path::new("/nonexistent")),
-        mf.as_ref(),
-        &catalog,
-    )?;
-
-    println!("{}", resolved.path);
-    Ok(())
-}
-
 /// Open a profile preset in the user's editor.
 pub fn edit_preset(name: Option<&str>, version_spec: Option<&str>) -> Result<()> {
     let project_dir = config::current_project_dir()?;
@@ -299,68 +265,6 @@ pub fn edit_preset(name: Option<&str>, version_spec: Option<&str>) -> Result<()>
     )?;
 
     profile_preset::edit_preset(&resolved.path)
-}
-
-/// Create a new profile preset file.
-pub fn new_preset(
-    name: &str,
-    global: bool,
-    from_template: Option<&str>,
-    version_spec: Option<&str>,
-) -> Result<()> {
-    let project_dir = config::current_project_dir()?;
-    let cfg = config::load_config(&project_dir)?;
-    let mf = manifest::fetch_from_config(&cfg).ok();
-
-    let runtime_dir = resolve_runtime_dir(version_spec)?;
-    let catalog = runtime_dir
-        .as_ref()
-        .and_then(|dir| {
-            dir.file_name()
-                .map(|n| n.to_string())
-                .and_then(|v| runtime_extension_catalog(&v, mf.as_ref()).ok())
-        })
-        .unwrap_or_default();
-
-    let path = profile_preset::create_preset(
-        name,
-        &project_dir,
-        global,
-        from_template,
-        mf.as_ref(),
-        &catalog,
-    )?;
-
-    output::success(&format!("Created profile preset: {}", path));
-    Ok(())
-}
-
-/// Fork an existing preset into the project profiles directory.
-pub fn fork_preset(src: &str, dst: &str, version_spec: Option<&str>) -> Result<()> {
-    let project_dir = config::current_project_dir()?;
-    let cfg = config::load_config(&project_dir)?;
-    let mf = manifest::fetch_from_config(&cfg).ok();
-    let runtime_dir = resolve_runtime_dir(version_spec)?;
-    let catalog = runtime_dir
-        .as_ref()
-        .and_then(|dir| {
-            dir.file_name()
-                .map(|n| n.to_string())
-                .and_then(|v| runtime_extension_catalog(&v, mf.as_ref()).ok())
-        })
-        .unwrap_or_default();
-
-    let path = profile_preset::fork_preset(
-        src,
-        dst,
-        &project_dir,
-        runtime_dir.as_deref(),
-        mf.as_ref(),
-        &catalog,
-    )?;
-
-    output::success(&format!("Forked profile preset to: {}", path));
-    Ok(())
 }
 
 /// Resolve enabled extensions for a named preset (for doctor/info; read-only).

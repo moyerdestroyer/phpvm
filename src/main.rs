@@ -1,7 +1,6 @@
 mod cli;
 mod config;
 mod doctor;
-mod extension;
 mod install;
 mod manifest;
 mod matrix;
@@ -42,7 +41,6 @@ fn run() -> Result<()> {
         Command::Matrix { command, .. } => matrix::run_with_format(&command, format)?,
         Command::Doctor { .. } => doctor::run_with_format(format)?,
         Command::ReleaseCheck { .. } => doctor::release_check_with_format(format)?,
-        Command::Profiles { .. } => profile::list_profiles(format)?,
         Command::Profile { command } => match command {
             cli::ProfileCommand::Use { name, version } => {
                 profile::use_profile(&name, version.as_deref())?
@@ -55,43 +53,11 @@ fn run() -> Result<()> {
                 };
                 profile::list_profiles(list_format)?
             }
-            cli::ProfileCommand::Path { name, version } => {
-                profile::preset_path(name.as_deref(), version.as_deref())?
-            }
             cli::ProfileCommand::Edit { name, version } => {
                 profile::edit_preset(name.as_deref(), version.as_deref())?
             }
-            cli::ProfileCommand::New {
-                name,
-                from,
-                global,
-                version,
-            } => profile::new_preset(&name, global, from.as_deref(), version.as_deref())?,
-            cli::ProfileCommand::Fork { src, dst, version } => {
-                profile::fork_preset(&src, &dst, version.as_deref())?
-            }
         },
-        Command::Ext { command } => match command {
-            cli::ExtCommand::List {
-                available,
-                enabled,
-                version,
-            } => extension::list(version.as_deref(), available, enabled)?,
-            cli::ExtCommand::Enable { name, version } => {
-                extension::enable(&name, version.as_deref())?
-            }
-            cli::ExtCommand::Disable { name, version } => {
-                extension::disable(&name, version.as_deref())?
-            }
-            cli::ExtCommand::Install {
-                source,
-                name,
-                kind,
-                version,
-            } => extension::install(&source, name.as_deref(), &kind, version.as_deref())?,
-            cli::ExtCommand::Path { version } => extension::path(version.as_deref())?,
-        },
-        Command::Ls | Command::Versions => version::list_installed()?,
+        Command::Ls => version::list_installed()?,
         Command::LsRemote => version::list_remote()?,
         Command::Info { version } => version::show_info(&version)?,
         Command::Use {
@@ -101,7 +67,6 @@ fn run() -> Result<()> {
         } => version::run_use(version.as_deref(), profile.as_deref(), silent)?,
         Command::Deactivate { silent, persist } => version::deactivate(silent, persist)?,
         Command::Env { version, shell } => version::print_env(version.as_deref(), &shell)?,
-        Command::Current => version::show_current()?,
     }
 
     Ok(())
