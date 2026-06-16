@@ -67,24 +67,6 @@ impl RuntimeExtension {
             file: None,
         }
     }
-
-    pub fn load_directive(&self) -> &'static str {
-        if self.extension_type == "zend_extension" {
-            "zend_extension"
-        } else {
-            "extension"
-        }
-    }
-
-    pub fn load_target(&self) -> String {
-        self.file.clone().unwrap_or_else(|| {
-            if cfg!(windows) {
-                format!("{}.dll", self.name)
-            } else {
-                format!("{}.so", self.name)
-            }
-        })
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,7 +105,8 @@ pub struct ManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 
-    /// Runtime packaging model. v2 manifests default to static.
+    /// Runtime packaging model. v2/v2.1 static manifests default to Static (the
+    /// long-term supported model). Dynamic is legacy/conditional.
     #[serde(default)]
     pub runtime_type: RuntimeType,
 
@@ -212,14 +195,6 @@ impl ManifestEntry {
             .and_then(profile::builtin_template)
             .map(|p| p.extensions)
             .unwrap_or_default()
-    }
-
-    pub fn is_dynamic(&self) -> bool {
-        self.runtime_type == RuntimeType::Dynamic
-    }
-
-    pub fn extension_detail(&self, name: &str) -> Option<&RuntimeExtension> {
-        self.extensions.iter().find(|ext| ext.name == name)
     }
 }
 
@@ -685,6 +660,26 @@ mod tests {
   ]
 }"#;
 
+    /// Pure static v2.1 entry with *no* runtime_type key (and no legacy url/sha).
+    /// Confirms serde default + is_dynamic() + catalog work for the new minimal static model.
+    const FIXTURE_PURE_STATIC_V21_JSON: &str = r#"{
+  "schema": "2.1",
+  "profiles": [{"name": "minimal", "extensions": []}],
+  "runtimes": [
+    {
+      "php": "8.4.5",
+      "composer": "2.9.2",
+      "extensions": ["curl", "mbstring", "openssl", "pdo_mysql", "tokenizer", "zip"],
+      "artifacts": {
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://example.com/php-8.4.5-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        }
+      }
+    }
+  ]
+}"#;
+
     const FIXTURE_V2_JSON: &str = r#"{
   "profiles": [
     {
@@ -879,6 +874,20 @@ mod tests {
     #[test]
     fn parse_v21_without_top_level_url_is_ok() {
         assert!(parse_manifest(FIXTURE_V21_JSON).is_ok());
+    }
+
+    #[test]
+    fn parse_pure_static_v21_no_runtime_type_key_defaults_to_static() {
+        let m = parse_manifest(FIXTURE_PURE_STATIC_V21_JSON).unwrap();
+        let entry = m.find("8.4.5").unwrap();
+        assert!(
+            entry.runtime_type == RuntimeType::Static,
+            "absent runtime_type must default to Static"
+        );
+        let catalog = entry.extension_catalog();
+        assert!(catalog.contains(&"pdo_mysql".to_string()));
+        assert!(catalog.contains(&"tokenizer".to_string()));
+        assert_eq!(catalog.len(), 6);
     }
 
     #[test]

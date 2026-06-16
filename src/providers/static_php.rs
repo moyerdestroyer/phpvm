@@ -457,12 +457,27 @@ pub fn apply_preset(
         profile_preset::resolve_preset(profile_name, project_dir, target, manifest, catalog)?;
 
     profile_preset::validate_preset_extensions(&preset.path, catalog)?;
-    let enabled_extensions = if entry.is_dynamic() {
-        profile_preset::activate_dynamic_preset(target, &preset.path, entry)?
-    } else {
-        profile_preset::activate_preset(target, &preset.path)?;
-        profile_preset::parse_enabled_extensions_from_file(&preset.path)?
-    };
+
+    // Static model baseline: profiles are user-level .ini presets for tuning
+    // (memory_limit, opcache, error_reporting, etc.). The binary has its
+    // extension catalog compiled in; we never write etc/, conf.d/, or
+    // extension load directives into the runtime tree.
+    let enabled = profile_preset::parse_enabled_extensions_from_file(&preset.path)?;
+
+    // Best-effort: materialize a sanitized copy of the active preset under
+    // ~/.phpvm/ini/<ver>.ini . This drives PHPRC for `phpvm use` and bare
+    // `php`/`composer` invocations so that profile settings take effect.
+    if let Ok(managed) = crate::runtime_metadata::managed_ini_for_version(&entry.php) {
+        if let Some(p) = managed.parent() {
+            let _ = fs::create_dir_all(p);
+        }
+        if let Ok(raw) = fs::read_to_string(&preset.path) {
+            let clean = profile_preset::filter_non_extension_ini_lines(&raw);
+            let _ = fs::write(&managed, clean);
+        }
+    }
+
+    let enabled_extensions = enabled;
 
     let mut metadata = RuntimeMetadata::read(&entry.php)?
         .unwrap_or_else(|| RuntimeMetadata::from_install(entry, profile_name, &preset, catalog));
@@ -640,7 +655,7 @@ mod tests {
     // ── profile ini presets ───────────────────────────────────────────
 
     #[test]
-    fn apply_preset_activates_ini_and_metadata() -> Result<()> {
+    fn apply_preset_static_writes_metadata_only_no_etc_tree() -> Result<()> {
         let target = tempfile::TempDir::new()?;
         let target_path = Utf8PathBuf::from_path_buf(target.path().to_path_buf())
             .map_err(|p| anyhow::anyhow!("{:?}", p))?;
@@ -650,52 +665,71 @@ mod tests {
             .map_err(|p| anyhow::anyhow!("{:?}", p))?;
         let preset_dir = project_path.join(".phpvm").join("profiles");
         fs::create_dir_all(&preset_dir)?;
-        let preset_path = preset_dir.join("wordpress.ini");
+        let preset_path = preset_dir.join("minimal.ini");
         fs::write(
             &preset_path,
-            "; test preset\nextension=curl\nextension=mbstring\n",
+            "; static-minimal\nmemory_limit=256M\ndisplay_errors=On\n",
         )?;
 
+        // Use a temp PHPVM_HOME so the managed ini materialize has a predictable place
+        let home = tempfile::TempDir::new()?;
+        let prev = std::env::var("PHPVM_HOME").ok();
+        std::env::set_var("PHPVM_HOME", home.path());
+
         let entry = ManifestEntry {
-            php: "8.3.23".into(),
+            php: "8.4.1".into(),
             composer: "2.9.2".into(),
             profile: None,
             runtime_type: RuntimeType::Static,
             abi: None,
             thread_safety: None,
             extension_api: None,
-            extensions: vec![
-                RuntimeExtension::from_name("curl".into()),
-                RuntimeExtension::from_name("mbstring".into()),
-            ],
-            url: "https://example.com/php-8.3.23.tar.gz".into(),
-            sha256: "00000000000000000000000000000000000000000000000000000000000000ab".into(),
+            extensions: vec![RuntimeExtension::from_name("curl".into())],
+            url: "https://example.com/php-8.4.1.tar.gz".into(),
+            sha256: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".into(),
             artifacts: None,
         };
         let catalog = entry.extension_catalog();
 
         apply_preset(
             &target_path,
-            "wordpress",
+            "minimal",
             &project_path,
             None,
             &catalog,
             &entry,
         )?;
 
-        let active_ini = crate::runtime_metadata::active_php_ini(&target_path);
-        assert!(active_ini.exists());
-        let content = fs::read_to_string(&active_ini)?;
-        assert!(content.contains("; test preset"));
-        assert!(!content.contains("extension=curl"));
+        // No etc/ tree for pure static
+        let etc = target_path.join("etc");
+        assert!(
+            !etc.exists(),
+            "static apply must not create etc/ inside runtime"
+        );
 
+        // Metadata still written (bookkeeping)
         let meta_path = target_path.join("metadata.json");
         assert!(meta_path.exists());
-        let content = fs::read_to_string(&meta_path)?;
-        let parsed: serde_json::Value = serde_json::from_str(&content)?;
-        assert_eq!(parsed["php"], "8.3.23");
-        assert_eq!(parsed["active_profile"], "wordpress");
-        assert_eq!(parsed["enabled_extensions"][0], "curl");
+        let parsed: serde_json::Value = serde_json::from_str(&fs::read_to_string(&meta_path)?)?;
+        assert_eq!(parsed["php"], "8.4.1");
+        assert_eq!(parsed["active_profile"], "minimal");
+
+        // Managed ini should have been materialized under the temp HOME/ini/
+        // (PHPVM_HOME points at the temp dir itself; data_dir uses it verbatim.)
+        let managed = home.path().join("ini").join("8.4.1.ini");
+        assert!(
+            managed.exists(),
+            "static profile should materialize managed ini for PHPRC"
+        );
+        let mcontent = fs::read_to_string(&managed)?;
+        assert!(mcontent.contains("memory_limit=256M"));
+        assert!(!mcontent.contains("extension="));
+
+        // restore env
+        match prev {
+            Some(v) => std::env::set_var("PHPVM_HOME", v),
+            None => std::env::remove_var("PHPVM_HOME"),
+        }
 
         Ok(())
     }

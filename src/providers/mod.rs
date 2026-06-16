@@ -1,5 +1,3 @@
-mod docker;
-mod local;
 pub mod static_php;
 
 use anyhow::Result;
