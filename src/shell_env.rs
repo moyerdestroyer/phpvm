@@ -97,10 +97,10 @@ pub fn build_activation_snippet(resolved: &str, runtime_path: &Utf8Path) -> Resu
     let runtimes_dir = config::runtimes_dir()?;
     let composer_homes_dir = data_dir.join("composer-homes");
 
-    let phprc_export = phprc_value(runtime_path)
+    let phprc_export = effective_phprc(runtime_path, resolved)
         .map(|dir| format!("export PHPRC={}\n", shell_quote(&dir)))
         .unwrap_or_default();
-    let scan_dir_export = php_ini_scan_dir_value(runtime_path)
+    let scan_dir_export = effective_scan_dir(runtime_path)
         .map(|dir| format!("export PHP_INI_SCAN_DIR={}\n", shell_quote(&dir)))
         .unwrap_or_default();
 
@@ -237,16 +237,28 @@ fn home_dir_display() -> String {
         .unwrap_or_else(|| "~".to_string())
 }
 
-fn phprc_value(runtime_path: &Utf8Path) -> Option<String> {
+/// Return PHPRC dir for the runtime.
+///
+/// Baseline (static): use the phpvm-managed ini under ~/.phpvm/ini/<ver>.ini
+/// (materialized from the active profile preset).
+///
+/// Compat: if an old runtime still has etc/php.ini on disk (pre-minimal-static
+/// layout), prefer that.
+fn effective_phprc(runtime_path: &Utf8Path, resolved: &str) -> Option<String> {
     let php_ini = crate::runtime_metadata::active_php_ini(runtime_path);
     if php_ini.exists() {
-        php_ini.parent().map(|dir| dir.to_string())
-    } else {
-        None
+        return php_ini.parent().map(|dir| dir.to_string());
     }
+    if let Ok(managed) = crate::runtime_metadata::managed_ini_for_version(resolved) {
+        if managed.exists() {
+            return managed.parent().map(|dir| dir.to_string());
+        }
+    }
+    None
 }
 
-fn php_ini_scan_dir_value(runtime_path: &Utf8Path) -> Option<String> {
+/// SCAN_DIR is only relevant for old runtimes that had a conf.d/ layout.
+fn effective_scan_dir(runtime_path: &Utf8Path) -> Option<String> {
     let conf_d = crate::runtime_metadata::conf_d_dir(runtime_path);
     if conf_d.exists() {
         Some(conf_d.to_string())
