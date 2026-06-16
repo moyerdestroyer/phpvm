@@ -82,7 +82,7 @@ php-8.3.23-x86_64-unknown-linux-gnu/    # top-level dir (any single segment name
     └── composer                          # executable (PHAR or binary wrapper)
 ```
 
-phpvm does **not** require `etc/` inside the tarball; it creates `etc/php.ini` and `metadata.json` on first `phpvm install` / profile activation.
+phpvm does **not** require (and for new static minimal tarballs does not create) `etc/`, `ext/`, or any internal ini tree inside the runtime directory. The tarball contains only `bin/`. phpvm writes `metadata.json` (bookkeeping) under `~/.phpvm/runtimes/<ver>/` and may write a managed user ini under `~/.phpvm/ini/<ver>.ini` for profile settings. Legacy installs may still contain `etc/`.
 
 ### Packaging rules
 
