@@ -4,60 +4,105 @@
 
 # phpvm
 
-**PHP Compatibility Manager** — run and test PHP apps across real versions without host PHP or Composer.
+**PHP, without the drama.** 
 
-## Install & update
+A lightweight tool for developers who need to hop between real PHP versions, run tests across them, and not think about it until they have to. Prebuilt static binaries, zero host PHP or Composer, and profiles that are just .ini files for the settings you actually care about.
 
-Install and update are the same command. Re-running replaces the CLI binary; runtimes in `~/.phpvm/` stay put.
+Install in one curl. Switch versions instantly. Test your stuff. Get back to writing code.
+
+## 30 seconds to up and running
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 ```
 
-Installs to `~/.local/bin/phpvm` (override with `PHPVM_INSTALL_DIR`). Supports Linux x86_64 and macOS (Intel + Apple Silicon). Needs only `curl`, `tar`, and `sha256sum`/`shasum`. Always fetches the latest published release.
-
-```bash
-# Build from source (Rust)
-cargo install --git https://github.com/moyerdestroyer/phpvm
-```
-
-Manual downloads: [GitHub Releases](https://github.com/moyerdestroyer/phpvm/releases)
-
-## Quickstart
-
-One minimal static PHP binary per version (extensions compiled in). **Profiles** are named `.ini` presets (memory, opcache, error reporting, etc.) — switch instantly for tuning; the catalog is in the manifest + `php -m`. 
+Then:
 
 ```bash
 phpvm install 8.3
-phpvm profile use laravel          # use the "laravel" preset php.ini
-phpvm profile edit wordpress       # open preset in $EDITOR
-phpvm profile list                 # list presets + paths
-
 phpvm run 8.3 php -v
 phpvm run 8.3 composer install
+```
+
+That's it. The runtime lives in `~/.phpvm/`, the CLI is in `~/.local/bin/phpvm` (or wherever you pointed the installer).
+
+Want more versions?
+
+```bash
+phpvm install 8.1 8.2 8.4
 phpvm matrix composer test
+```
+
+Checking a release is about to ship?
+
+```bash
 phpvm doctor
 phpvm release-check
 ```
 
-Set the default profile in `.phpvm.toml`:
+## Profiles = your settings, your way
+
+Profiles are plain `.ini` files. They handle memory limits, opcache, error reporting, and whatever else you tweak. The extensions are already compiled into the binary — no more extension= gymnastics.
+
+```bash
+phpvm install 8.3 --profile=laravel
+phpvm profile use wordpress
+phpvm profile edit my-team-rules
+phpvm profile list
+```
+
+Drop team presets in `.phpvm/profiles/` in your repo. They get picked up automatically. phpvm never clobbers files you already have.
+
+Set a project default in `.phpvm.toml`:
 
 ```toml
 profile = "wordpress"
 ```
 
-Preset lookup: `.phpvm/profiles/<name>.ini` → `~/.phpvm/profiles/` → bundled starters (`wordpress`, `laravel`, `minimal`). Commit project presets; phpvm never overwrites existing files.
+## The shell integration (this is the good part)
 
-For daily dev, enable the shell integration when the installer asks. It adds one shell rc block that points at the installed binary and runs `phpvm env`, which makes `phpvm` available as a shell function and makes `phpvm use 8.3 --profile=laravel` activate bare `php`/`composer`. Prefer `run` and `matrix` for reproducible checks.
+Run the installer and say yes to shell integration, or add this to your `.zshrc`/`.bashrc`:
+
+```bash
+eval "$(phpvm env)"
+```
+
+Now you can do:
+
+```bash
+phpvm use 8.3 --profile=laravel
+# boom — bare `php` and `composer` just work in this shell (and future shells)
+```
+
+`phpvm use system` drops you back to whatever your OS ships. `phpvm deactivate` if you want to undo for the current shell only.
+
+Prefer explicit? `phpvm run 8.3 ...` always works and is great for scripts/CI.
 
 ## Uninstall
 
 ```bash
 rm ~/.local/bin/phpvm
-# full cleanup: also rm -rf ~/.phpvm
+# full nuke (optional)
+rm -rf ~/.phpvm
 ```
+
+## We actually want your feedback
+
+This thing exists because developers get tired of "but it works with 8.2 on my machine." We're optimizing for the workflows that matter: quick installs, easy matrix testing, `doctor` and `release-check` when you're about to ship, and not having to care about PHP until you do.
+
+If you're kicking the tires:
+
+- Does it feel fast and obvious?
+- Is there a workflow you wish it just handled?
+- Got a weird edge case or a feature that would make your life better?
+
+Open an issue. Comment on a release. Tell us what sucks or what rules. User testing and real suggestions are how this gets better — we're not trying to build the perfect compatibility matrix in a vacuum.
+
+Star the repo, try it on a side project, and let us know how it goes.
 
 ## Learn more
 
-- [AGENTS.md](AGENTS.md) — architecture and contribution guide
-- [Project.md](Project.md) — full vision and design
+- [AGENTS.md](AGENTS.md) — how the thing is built and how to contribute
+- [GitHub](https://github.com/moyerdestroyer/phpvm) — issues, releases, the usual
+
+Happy hacking.
