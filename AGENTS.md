@@ -37,7 +37,7 @@ PHPVM is a single-crate CLI. Modules live in `src/` and are organized by domain:
 | `profile_preset` | Ini preset resolution, materialization, and activation |
 | `runner` | Single-runtime command execution |
 | `version` | PHP version resolution and listing |
-| `providers/` | Runtime installation backends (static_php, docker, local) |
+| `providers/` | Runtime installation backends (static_php) |
 
 ### Primary User Workflows
 
@@ -62,20 +62,20 @@ When making design decisions, optimize for these workflows first.
 
 ### Providers
 
-Providers implement a common interface. The rest of the application should not know whether a runtime came from `static_php`, `docker`, or `local`. Provider-specific behavior stays inside the provider implementation.
+Providers implement a common interface. The rest of the application should not know provider-specific install details. Provider-specific behavior stays inside the provider implementation.
 
 ### Profiles
 
-Profiles are **named `.ini` preset files** — full php.ini configs (extensions, memory limits, opcache, xdebug, etc.). One full binary is installed per PHP version; switching profiles copies a preset to the active `etc/php.ini`.
+Profiles are **named `.ini` preset files** — full php.ini content for tuning (memory limits, opcache, error reporting, etc.). For the static-only runtime model, profiles no longer drive loading of loadable extensions inside the binary (those are compiled in and visible via `php -m`). Switching a profile updates phpvm-level state (active profile recorded in `metadata.json`, doctor recommendations, `info`) and, for static runtimes, materializes a sanitized copy of the preset under `~/.phpvm/ini/<ver>.ini` so that `PHPRC` after `phpvm use` picks up the tuning directives.
 
 **Resolution order** (first match wins):
 
 1. `<project>/.phpvm/profiles/<name>.ini`
 2. `~/.phpvm/profiles/<name>.ini`
-3. `~/.phpvm/runtimes/<version>/etc/profiles/<name>.ini`
+3. `~/.phpvm/runtimes/<version>/etc/profiles/<name>.ini` (legacy dynamic or old installs only)
 4. Bundled starter (materialized to global **only if missing**)
 
-Built-in starters: **wordpress**, **laravel**, **minimal** (shipped in `profiles/`; manifest templates are a fallback when no bundled file exists).
+Built-in starters: **wordpress**, **laravel**, **minimal** (shipped in `profiles/`; manifest templates are a fallback when no bundled file exists). Bundled starters for static no longer contain `extension=...` directives (the manifest `runtimes[].extensions` catalog + the compiled binary are authoritative).
 
 ```toml
 # .phpvm.toml — default preset name only
@@ -90,16 +90,15 @@ my-app/.phpvm/profiles/debug.ini
 
 Commands:
 
-- `phpvm install 8.3 --profile=wordpress` — download once, activate initial preset
-- `phpvm profile use laravel` — switch active runtime's ini preset
-- `phpvm profile list` / `phpvm profiles` — list presets and source paths
-- `phpvm profile path [name]` — print resolved preset path (for editors/CI)
+- `phpvm install 8.3 --profile=wordpress` — download once, record initial profile (light for static)
+- `phpvm profile use laravel` — switch active profile (updates metadata + managed ini for static)
+- `phpvm profile list` — list presets and source paths
 - `phpvm profile edit [name]` — open preset in `$EDITOR`
-- `phpvm profile new <name> [--from <template>] [--global]`
-- `phpvm profile fork <src> <dst>`
 - `phpvm use 8.3 --profile=laravel` — version activation + profile in one step
 
 phpvm **never overwrites** an existing project/global/runtime preset file.
+
+Installed static runtime layout (new installs): only `bin/php`, `bin/composer*`, and `metadata.json`. No `etc/`, `ext/`, or runtime-owned ini trees are created. Legacy dynamic installs may still contain them; phpvm honors `etc/` when present for backward compat but does not create it for fresh static runtimes.
 
 ### Manifest Contract
 
@@ -271,9 +270,7 @@ src/
 ├── version.rs       # Version resolution and listing
 └── providers/
     ├── mod.rs        # Provider trait definition
-    ├── static_php.rs # Prebuilt binary provider (V1)
-    ├── docker.rs     # Docker provider (future)
-    └── local.rs      # Host PHP provider (development only)
+    └── static_php.rs # Prebuilt binary provider (V1)
 
 fixtures/
 ├── wordpress-plugin/ # Minimal WordPress plugin fixture

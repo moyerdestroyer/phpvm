@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config;
-use crate::profile::{self, ProfileTemplate};
+use crate::profile::ProfileTemplate;
 
 /// A downloadable runtime archive (manifest v2.1 per-platform artifacts).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,24 +67,6 @@ impl RuntimeExtension {
             file: None,
         }
     }
-
-    pub fn load_directive(&self) -> &'static str {
-        if self.extension_type == "zend_extension" {
-            "zend_extension"
-        } else {
-            "extension"
-        }
-    }
-
-    pub fn load_target(&self) -> String {
-        self.file.clone().unwrap_or_else(|| {
-            if cfg!(windows) {
-                format!("{}.dll", self.name)
-            } else {
-                format!("{}.so", self.name)
-            }
-        })
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,7 +105,8 @@ pub struct ManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 
-    /// Runtime packaging model. v2 manifests default to static.
+    /// Runtime packaging model. v2/v2.1 static manifests default to Static (the
+    /// long-term supported model). Dynamic is legacy/conditional.
     #[serde(default)]
     pub runtime_type: RuntimeType,
 
@@ -159,7 +142,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 
-    /// Named extension presets for starter ini seeding (not user config).
+    /// Named INI starter presets (not runtime configuration).
     #[serde(default)]
     pub profiles: Vec<ProfileTemplate>,
 
@@ -202,24 +185,7 @@ impl ManifestEntry {
 
     /// Extensions available in the installed binary for this runtime.
     pub fn extension_catalog(&self) -> Vec<String> {
-        if !self.extensions.is_empty() {
-            return self.extensions.iter().map(|ext| ext.name.clone()).collect();
-        }
-
-        // v1 fallback: union builtins when the manifest has not published catalogs yet.
-        self.profile
-            .as_deref()
-            .and_then(profile::builtin_template)
-            .map(|p| p.extensions)
-            .unwrap_or_default()
-    }
-
-    pub fn is_dynamic(&self) -> bool {
-        self.runtime_type == RuntimeType::Dynamic
-    }
-
-    pub fn extension_detail(&self, name: &str) -> Option<&RuntimeExtension> {
-        self.extensions.iter().find(|ext| ext.name == name)
+        self.extensions.iter().map(|ext| ext.name.clone()).collect()
     }
 }
 
@@ -229,12 +195,9 @@ impl Manifest {
         self.runtimes.iter().find(|e| e.php == php_version)
     }
 
-    /// Resolve a manifest profile template by name, falling back to built-ins.
+    /// Resolve a manifest profile template by name.
     pub fn resolve_profile_template(&self, name: &str) -> Option<ProfileTemplate> {
-        if let Some(p) = self.profiles.iter().find(|p| p.name == name) {
-            return Some(p.clone());
-        }
-        profile::builtin_template(name)
+        self.profiles.iter().find(|p| p.name == name).cloned()
     }
 
     /// Find the latest (highest) patch version for a given `major.minor`.
@@ -416,10 +379,6 @@ pub fn fetch_entry(version: &str) -> Result<ManifestEntry> {
 // ── Internal helpers ────────────────────────────────────────────────────
 
 fn normalize_manifest(mut manifest: Manifest) -> Result<Manifest> {
-    if manifest.profiles.is_empty() {
-        manifest.profiles = profile::builtin_templates();
-    }
-
     let mut grouped: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
     for entry in manifest.runtimes {
         grouped.entry(entry.php.clone()).or_default().push(entry);
@@ -485,14 +444,6 @@ fn merge_runtime_entries(php: &str, entries: Vec<ManifestEntry>) -> Result<Manif
             for ext in &entry.extensions {
                 if !extensions.iter().any(|existing| existing.name == ext.name) {
                     extensions.push(ext.clone());
-                }
-            }
-        } else if let Some(profile_name) = entry.profile.as_deref() {
-            if let Some(p) = profile::builtin_template(profile_name) {
-                for name in p.extensions {
-                    if !extensions.iter().any(|existing| existing.name == name) {
-                        extensions.push(RuntimeExtension::from_name(name));
-                    }
                 }
             }
         }
@@ -685,6 +636,26 @@ mod tests {
   ]
 }"#;
 
+    /// Pure static v2.1 entry with *no* runtime_type key (and no legacy url/sha).
+    /// Confirms serde default + is_dynamic() + catalog work for the new minimal static model.
+    const FIXTURE_PURE_STATIC_V21_JSON: &str = r#"{
+  "schema": "2.1",
+  "profiles": [{"name": "minimal", "extensions": []}],
+  "runtimes": [
+    {
+      "php": "8.4.5",
+      "composer": "2.9.2",
+      "extensions": ["curl", "mbstring", "openssl", "pdo_mysql", "tokenizer", "zip"],
+      "artifacts": {
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://example.com/php-8.4.5-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        }
+      }
+    }
+  ]
+}"#;
+
     const FIXTURE_V2_JSON: &str = r#"{
   "profiles": [
     {
@@ -727,7 +698,7 @@ mod tests {
     fn parse_v1_normalizes_to_one_entry_per_php() {
         let m = fixture_v1();
         assert_eq!(m.runtimes.len(), 4);
-        assert_eq!(m.profiles.len(), 3);
+        assert!(m.profiles.is_empty());
     }
 
     #[test]
@@ -740,17 +711,17 @@ mod tests {
     }
 
     #[test]
-    fn v1_wordpress_entry_gains_extension_catalog() {
+    fn v1_wordpress_entry_keeps_its_explicit_extension_catalog() {
         let m = fixture_v1();
         let entry = m.find("8.2.0").unwrap();
-        assert!(entry.extension_catalog().contains(&"mysqli".to_string()));
+        assert!(entry.extension_catalog().is_empty());
     }
 
     #[test]
     fn resolve_profile_template_prefers_manifest_preset() {
         let m = fixture_v2();
         let resolved = m.resolve_profile_template("wordpress").unwrap();
-        assert_eq!(resolved.extensions.len(), 10);
+        assert_eq!(resolved.name, "wordpress");
     }
 
     #[test]
@@ -807,7 +778,7 @@ mod tests {
         let json = r#"{"runtimes": []}"#;
         let m = parse_manifest(json).unwrap();
         assert!(m.runtimes.is_empty());
-        assert_eq!(m.profiles.len(), 3);
+        assert!(m.profiles.is_empty());
     }
 
     #[test]
@@ -879,6 +850,20 @@ mod tests {
     #[test]
     fn parse_v21_without_top_level_url_is_ok() {
         assert!(parse_manifest(FIXTURE_V21_JSON).is_ok());
+    }
+
+    #[test]
+    fn parse_pure_static_v21_no_runtime_type_key_defaults_to_static() {
+        let m = parse_manifest(FIXTURE_PURE_STATIC_V21_JSON).unwrap();
+        let entry = m.find("8.4.5").unwrap();
+        assert!(
+            entry.runtime_type == RuntimeType::Static,
+            "absent runtime_type must default to Static"
+        );
+        let catalog = entry.extension_catalog();
+        assert!(catalog.contains(&"pdo_mysql".to_string()));
+        assert!(catalog.contains(&"tokenizer".to_string()));
+        assert_eq!(catalog.len(), 6);
     }
 
     #[test]

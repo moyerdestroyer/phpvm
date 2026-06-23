@@ -44,15 +44,27 @@ fn apply_runtime_env(cmd: &mut Command, runtime_path: &Utf8PathBuf, resolved: &s
     cmd.env("COMPOSER_HOME", composer_home.as_str());
     cmd.env("PHPVM_VERSION", resolved);
 
-    if let Some(etc_dir) = runtime_metadata::active_php_ini(runtime_path)
+    // For the static baseline, we use a phpvm-managed ini (written under
+    // ~/.phpvm/ini/<ver>.ini by profile apply) so that preset tuning
+    // (memory_limit, etc.) takes effect for bare `php` after `phpvm use`.
+    //
+    // For very old on-disk runtimes that still have an etc/php.ini tree from
+    // before the minimal-static changes, we honor it as a compat fallback.
+    let ini_parent = runtime_metadata::active_php_ini(runtime_path)
         .parent()
-        .filter(|p| p.exists())
-    {
-        cmd.env("PHPRC", etc_dir.as_str());
-    }
-    let scan_dir = runtime_metadata::conf_d_dir(runtime_path);
-    if scan_dir.exists() {
-        cmd.env("PHP_INI_SCAN_DIR", scan_dir.as_str());
+        .map(|p| p.to_owned());
+    if let Some(dir) = ini_parent.filter(|p| p.exists()) {
+        cmd.env("PHPRC", dir.as_str());
+        let scan = runtime_metadata::conf_d_dir(runtime_path);
+        if scan.exists() {
+            cmd.env("PHP_INI_SCAN_DIR", scan.as_str());
+        }
+    } else if let Ok(managed) = runtime_metadata::managed_ini_for_version(resolved) {
+        if managed.exists() {
+            if let Some(dir) = managed.parent() {
+                cmd.env("PHPRC", dir.as_str());
+            }
+        }
     }
 
     Ok(())

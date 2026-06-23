@@ -1,4 +1,8 @@
-# Manifest v3 — Dynamic Runtime Bundles
+# Manifest v3 — Dynamic Runtime Bundles (legacy)
+
+> **Legacy / transition only.** New runtimes and catalogs should use the static v2.1
+> contract (see manifest-v2.md). Manifest v3 describes the older dynamic bundle
+> layout with loadable `ext/` and runtime-owned `etc/conf.d/`.
 
 Manifest v3 describes PHP runtime bundles that work like the official Windows
 ZIP layout, but with only the files phpvm needs for CLI workflows.
@@ -82,8 +86,8 @@ extraction.
 
 ## Rules
 
-- `runtime_type = "dynamic"` means profiles and `phpvm ext` manage loadable
-  extension snippets under `etc/conf.d/`.
+- `runtime_type = "dynamic"` means profile presets manage loadable extension
+  snippets under `etc/conf.d/`.
 - `extensions[].name` is the user-facing extension name.
 - `extensions[].type` is either `extension` or `zend_extension`.
 - `extensions[].file` is relative to the runtime root. phpvm writes absolute
@@ -91,11 +95,7 @@ extraction.
 - Profiles are extension enablement presets plus ordinary INI tuning. Activating
   a profile writes `etc/conf.d/20-profile.ini`; it does not replace the base
   `etc/php.ini`.
-- Custom extension installs are stored under `ext/custom/` and enabled through
-  `etc/conf.d/30-extension-<name>.ini`.
-
 ## Compatibility
 
 phpvm still accepts v1/v2/v2.1 manifests. Those runtimes default to
-`runtime_type = "static"` and continue through the legacy profile path. Dynamic
-extension commands reject static runtimes with an explicit error.
+`runtime_type = "static"` and continue through the legacy profile path.

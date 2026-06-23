@@ -36,14 +36,6 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("PHP version {} not found in manifest", resolved))?;
 
-    let catalog = manifest_entry.extension_catalog();
-    if catalog.is_empty() {
-        output::warn(
-            "Manifest entry has no extension catalog; profile switching may be limited \
-             until full-binary manifests are published.",
-        );
-    }
-
     let runtimes_dir = config::runtimes_dir()?;
     let runtime_path = runtimes_dir.join(&resolved);
     let runtime_installed = runtime_is_complete(&runtime_path);
@@ -68,7 +60,6 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
             profile_label,
             &project_dir,
             Some(&mf),
-            &catalog,
             &manifest_entry,
         ) {
             steps.fail(&step_label, &e.to_string());
@@ -92,7 +83,6 @@ pub fn run(version: &str, profile_name: Option<&str>) -> Result<()> {
         profile_label,
         &project_dir,
         Some(&mf),
-        &catalog,
     )?;
 
     output::blank();

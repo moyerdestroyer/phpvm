@@ -7,7 +7,6 @@ use crate::config;
 use crate::output::{
     self, DoctorResult, MatrixEntry, MatrixResult, OutputFormat, ReleaseCheckResult, RunStatus,
 };
-use crate::profile;
 use crate::runner;
 
 // ---------------------------------------------------------------------------
@@ -99,15 +98,7 @@ pub fn read_required_extensions(project_dir: &Utf8Path) -> Vec<String> {
     extensions
 }
 
-fn missing_extensions_for_preset(required: &[String], enabled: &[String]) -> Vec<String> {
-    required
-        .iter()
-        .filter(|ext| !enabled.iter().any(|e| e == *ext))
-        .cloned()
-        .collect()
-}
-
-/// Recommend an extension profile based on the detected project type.
+/// Recommend an INI tuning profile based on the detected project type.
 ///
 /// - WordPress Plugin → `"wordpress"`
 /// - Laravel Application → `"laravel"`
@@ -141,7 +132,7 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         Err(e) => {
             if matches!(format, OutputFormat::Human) {
                 output::warn(&format!(
-                    "Could not fetch manifest: {e}. Extension recommendations may be incomplete."
+                    "Could not fetch manifest: {e}. Runtime extension verification may be incomplete."
                 ));
             }
             None
@@ -157,43 +148,159 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         .clone()
         .or_else(|| project_type.as_ref().map(|pt| recommend_profile(pt)));
 
-    let enabled_extensions = profile_name
-        .as_deref()
-        .and_then(|name| {
-            profile::enabled_extensions_for_preset(name, &project_dir, mf.as_ref()).ok()
-        })
-        .unwrap_or_default();
-
-    let missing_extensions = if profile_name.is_some() {
-        missing_extensions_for_preset(&required_extensions, &enabled_extensions)
-    } else {
-        Vec::new()
-    };
-
     let recommended_matrix = config::resolve_matrix(&config);
 
     if matches!(format, OutputFormat::Human) {
         warn_if_matrix_may_conflict_with_constraint(&recommended_matrix, php_constraint.as_deref());
     }
 
-    if !enabled_extensions.is_empty() && matches!(format, OutputFormat::Human) {
-        output::info(&format!(
-            "Enabled extensions: {}",
-            enabled_extensions.join(", ")
-        ));
-    }
+    // Best-effort runtime verification for the static model.
+    // Determines a candidate version from persisted use / installed, then execs
+    // its bin/php + bin/composer directly and checks php -m against the manifest
+    // catalog. Never falls back to host PHP.
+    let (rt_version, rt_ok, rt_php_v, rt_missing, rt_missing_required) =
+        verify_runtime(mf.as_ref(), &required_extensions);
 
     let result = DoctorResult {
         project_type,
         php_constraint,
         profile: profile_name,
         required_extensions,
-        missing_extensions,
         recommended_matrix,
+        runtime_version: rt_version,
+        runtime_ok: rt_ok,
+        runtime_php_version: rt_php_v,
+        missing_catalog_extensions: rt_missing,
+        missing_required_extensions: rt_missing_required,
     };
 
     output::print_doctor_result(&result, format);
     Ok(())
+}
+
+/// Attempt to locate an active or default installed runtime and perform basic
+/// health + catalog checks. Returns tuple fields suitable for DoctorResult.
+/// Failures are non-fatal (doctor still reports project info).
+#[allow(clippy::type_complexity)]
+fn verify_runtime(
+    mf: Option<&crate::manifest::Manifest>,
+    required_extensions: &[String],
+) -> (
+    Option<String>,
+    Option<bool>,
+    Option<String>,
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+) {
+    use std::process::Command;
+
+    // Pick a version: prefer the globally persisted one, then resolve_active on
+    // installed list, else first installed (best effort, no hard fail).
+    let installed = crate::runner::installed_versions().unwrap_or_default();
+    let candidate = crate::config::get_current_version()
+        .or_else(|| crate::version::resolve_active_version(&installed))
+        .or_else(|| installed.first().cloned());
+
+    let Some(ver) = candidate else {
+        return (None, None, None, None, None);
+    };
+
+    let runtimes = match crate::config::runtimes_dir() {
+        Ok(d) => d,
+        Err(_) => return (Some(ver), Some(false), None, None, None),
+    };
+    let rt_dir = runtimes.join(&ver);
+    if !rt_dir.exists() {
+        return (Some(ver), Some(false), None, None, None);
+    }
+
+    let bin_name = if cfg!(windows) { "php.exe" } else { "php" };
+    let php_bin = rt_dir.join("bin").join(bin_name);
+    if !php_bin.exists() {
+        return (Some(ver.clone()), Some(false), None, None, None);
+    }
+
+    // php -v
+    let v_out = Command::new(&php_bin).arg("-v").output();
+    let (php_v_line, v_ok) = match v_out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let first = s.lines().next().unwrap_or("").trim().to_string();
+            (Some(first), true)
+        }
+        _ => (None, false),
+    };
+
+    // composer -V (best effort; co-located or in bin)
+    let comp_name = if cfg!(windows) {
+        "composer.exe"
+    } else {
+        "composer"
+    };
+    let comp_bin = rt_dir.join("bin").join(comp_name);
+    let comp_ok = if comp_bin.exists() {
+        Command::new(&comp_bin)
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // php -m
+    let m_out = Command::new(&php_bin).arg("-m").output();
+    let modules: Vec<String> = match m_out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty() && !l.starts_with('['))
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // Catalog from manifest (preferred) or fall back to empty.
+    let catalog: Vec<String> = mf
+        .and_then(|m| m.find(&ver))
+        .map(|e| e.extension_catalog())
+        .unwrap_or_default();
+
+    let missing_cat: Vec<String> = catalog
+        .iter()
+        .filter(|extension| !modules_include_extension(&modules, extension))
+        .cloned()
+        .collect();
+
+    let missing_required: Vec<String> = required_extensions
+        .iter()
+        .filter(|extension| !modules_include_extension(&modules, extension))
+        .cloned()
+        .collect();
+
+    let overall_ok = v_ok && comp_ok && missing_cat.is_empty() && missing_required.is_empty();
+
+    (
+        Some(ver),
+        Some(overall_ok),
+        php_v_line,
+        if missing_cat.is_empty() {
+            None
+        } else {
+            Some(missing_cat)
+        },
+        if missing_required.is_empty() {
+            None
+        } else {
+            Some(missing_required)
+        },
+    )
+}
+
+fn modules_include_extension(modules: &[String], extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    modules
+        .iter()
+        .any(|module| module == &extension || module.contains(&extension))
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +644,14 @@ mod tests {
 
         let extensions = read_required_extensions(&utf8(&dir));
         assert_eq!(extensions, vec!["curl", "mbstring", "tokenizer"]);
+    }
+
+    #[test]
+    fn modules_include_required_extension_from_static_runtime_output() {
+        let modules = vec!["curl".to_string(), "zend opcache".to_string()];
+        assert!(modules_include_extension(&modules, "curl"));
+        assert!(modules_include_extension(&modules, "opcache"));
+        assert!(!modules_include_extension(&modules, "imagick"));
     }
 
     // -- recommend_profile ----------------------------------------------------

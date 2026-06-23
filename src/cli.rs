@@ -14,7 +14,7 @@ pub enum Command {
     Install {
         /// PHP version to install (e.g. 8.3, 8.3.23, 8.3.latest)
         version: String,
-        /// Extension profile to install (wordpress, laravel, minimal, or custom)
+        /// INI tuning profile to apply (wordpress, laravel, minimal, or custom)
         #[arg(long)]
         profile: Option<String>,
     },
@@ -44,7 +44,7 @@ pub enum Command {
     Use {
         /// PHP version to activate (e.g. 8.3, 8.3.23, system). Must be installed.
         version: Option<String>,
-        /// Extension profile ini preset to activate for this runtime
+        /// INI tuning preset to activate for this runtime
         #[arg(long)]
         profile: Option<String>,
         /// Suppress informational messages (for shell hooks)
@@ -86,10 +86,6 @@ pub enum Command {
         shell: String,
     },
 
-    /// Show the PHP version that is currently active (from `phpvm use` or
-    /// the current shell environment).
-    Current,
-
     /// Run a command across multiple PHP runtimes
     Matrix {
         /// Output format: human or json
@@ -114,23 +110,10 @@ pub enum Command {
         json: bool,
     },
 
-    /// List available extension profiles
-    Profiles {
-        /// Output in JSON format
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Switch extension profile presets (ini configs) on installed runtimes
+    /// Switch INI tuning presets on installed runtimes
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
-    },
-
-    /// Manage loadable extensions for dynamic runtimes
-    Ext {
-        #[command(subcommand)]
-        command: ExtCommand,
     },
 
     /// List installed PHP runtimes
@@ -139,14 +122,11 @@ pub enum Command {
     /// List PHP versions available for install (from remote manifest)
     LsRemote,
 
-    /// Show metadata for a PHP runtime (PHP, Composer, profile, extensions)
+    /// Show metadata for a PHP runtime (PHP, Composer, profile, compiled extensions)
     Info {
         /// PHP version specifier (e.g. 8.3, 8.3.23, 8.3.latest)
         version: String,
     },
-
-    /// List installed PHP runtimes (deprecated; use `ls`)
-    Versions,
 }
 
 #[derive(Subcommand)]
@@ -167,102 +147,11 @@ pub enum ProfileCommand {
         json: bool,
     },
 
-    /// Print the resolved path to a profile preset file
-    Path {
-        /// Profile name (defaults to active profile)
-        name: Option<String>,
-        /// PHP version context for runtime-local presets
-        #[arg(long)]
-        version: Option<String>,
-    },
-
     /// Open a profile preset in $EDITOR (or $VISUAL)
     Edit {
         /// Profile name (defaults to active profile)
         name: Option<String>,
         /// PHP version context for runtime-local presets
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Create a new profile preset ini file
-    New {
-        /// Name for the new preset
-        name: String,
-        /// Template preset to copy from (default: minimal)
-        #[arg(long)]
-        from: Option<String>,
-        /// Write to ~/.phpvm/profiles/ instead of project .phpvm/profiles/
-        #[arg(long)]
-        global: bool,
-        /// PHP version context for extension catalog when seeding
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Copy an existing preset to a new name in the project profiles directory
-    Fork {
-        /// Source preset name
-        src: String,
-        /// Destination preset name
-        dst: String,
-        /// PHP version context for resolving the source preset
-        #[arg(long)]
-        version: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum ExtCommand {
-    /// List extensions for the active or selected runtime
-    List {
-        /// Show only extensions available in the runtime bundle
-        #[arg(long)]
-        available: bool,
-        /// Show only extensions currently enabled by profile/custom snippets
-        #[arg(long)]
-        enabled: bool,
-        /// PHP version context (defaults to active runtime)
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Enable a bundled or installed loadable extension
-    Enable {
-        /// Extension name
-        name: String,
-        /// PHP version context (defaults to active runtime)
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Disable a manually-enabled extension snippet
-    Disable {
-        /// Extension name
-        name: String,
-        /// PHP version context (defaults to active runtime)
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Install a custom extension binary into the selected runtime
-    Install {
-        /// Local extension file path, archive path, or URL
-        source: String,
-        /// Extension name (defaults to file stem)
-        #[arg(long)]
-        name: Option<String>,
-        /// Load directive type: extension or zend_extension
-        #[arg(long, default_value = "extension", value_parser = ["extension", "zend_extension"])]
-        kind: String,
-        /// PHP version context (defaults to active runtime)
-        #[arg(long)]
-        version: Option<String>,
-    },
-
-    /// Print the selected runtime's extension directory
-    Path {
-        /// PHP version context (defaults to active runtime)
         #[arg(long)]
         version: Option<String>,
     },
@@ -274,9 +163,7 @@ impl Command {
     pub fn output_format(&self) -> crate::output::OutputFormat {
         match self {
             Command::Matrix { report, .. } => parse_report_format(report),
-            Command::Doctor { json }
-            | Command::ReleaseCheck { json }
-            | Command::Profiles { json } => {
+            Command::Doctor { json } | Command::ReleaseCheck { json } => {
                 if *json {
                     crate::output::OutputFormat::Json
                 } else {

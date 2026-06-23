@@ -89,15 +89,6 @@ fn phpvm_release_check_help() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn phpvm_versions_without_runtimes() {
-    Command::cargo_bin("phpvm")
-        .unwrap()
-        .arg("versions")
-        .assert()
-        .success();
-}
-
-#[test]
 fn phpvm_ls_succeeds() {
     Command::cargo_bin("phpvm")
         .unwrap()
@@ -186,26 +177,6 @@ fn phpvm_use_unknown_version_fails() {
         .failure()
         .stderr(predicate::str::contains("not installed"))
         .stderr(predicate::str::contains("phpvm install"));
-}
-
-#[test]
-fn phpvm_current_succeeds() {
-    Command::cargo_bin("phpvm")
-        .unwrap()
-        .arg("current")
-        .assert()
-        .success();
-}
-
-#[test]
-fn phpvm_current_help() {
-    Command::cargo_bin("phpvm")
-        .unwrap()
-        .arg("current")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("currently active"));
 }
 
 #[test]
@@ -462,14 +433,15 @@ fn phpvm_use_accepts_profile_flag() {
 }
 
 // ---------------------------------------------------------------------------
-// Profiles command
+// profile list command
 // ---------------------------------------------------------------------------
 
 #[test]
-fn phpvm_profiles_lists_builtins() {
+fn phpvm_profile_list_lists_builtins() {
     Command::cargo_bin("phpvm")
         .unwrap()
-        .arg("profiles")
+        .arg("profile")
+        .arg("list")
         .assert()
         .success()
         .stdout(predicate::str::contains("wordpress"))
@@ -478,10 +450,11 @@ fn phpvm_profiles_lists_builtins() {
 }
 
 #[test]
-fn phpvm_profiles_json_output() {
+fn phpvm_profile_list_json_output() {
     Command::cargo_bin("phpvm")
         .unwrap()
-        .arg("profiles")
+        .arg("profile")
+        .arg("list")
         .arg("--json")
         .assert()
         .success()

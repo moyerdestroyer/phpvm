@@ -35,9 +35,6 @@ pub struct RuntimeMetadata {
     /// Extension names available in the runtime (legacy-friendly summary).
     #[serde(default)]
     pub available_extensions: Vec<String>,
-    /// Extensions currently enabled via the active profile ini.
-    #[serde(default, alias = "extensions")]
-    pub enabled_extensions: Vec<String>,
     #[serde(default)]
     pub installed_at: Option<String>,
 }
@@ -71,10 +68,7 @@ impl RuntimeMetadata {
         entry: &ManifestEntry,
         profile_name: &str,
         preset: &profile_preset::ResolvedPreset,
-        catalog: &[String],
     ) -> Self {
-        let enabled =
-            profile_preset::parse_enabled_extensions_from_file(&preset.path).unwrap_or_default();
         Self {
             php: entry.php.clone(),
             composer: entry.composer.clone(),
@@ -85,8 +79,7 @@ impl RuntimeMetadata {
             thread_safety: entry.thread_safety.clone(),
             extension_api: entry.extension_api.clone(),
             extension_catalog: entry.extensions.clone(),
-            available_extensions: catalog.to_vec(),
-            enabled_extensions: enabled,
+            available_extensions: entry.extension_catalog(),
             installed_at: Some(iso8601_now()),
         }
     }
@@ -98,9 +91,6 @@ impl RuntimeMetadata {
     ) {
         self.active_profile = profile_name.to_string();
         self.preset_source = Some(format_preset_source(preset));
-        if let Ok(enabled) = profile_preset::parse_enabled_extensions_from_file(&preset.path) {
-            self.enabled_extensions = enabled;
-        }
     }
 }
 
@@ -161,16 +151,6 @@ pub fn conf_d_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
     runtime_dir.join("etc").join("conf.d")
 }
 
-/// Return the bundled extension directory for a runtime.
-pub fn extension_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
-    runtime_dir.join("ext")
-}
-
-/// Return the custom extension directory for a runtime.
-pub fn custom_extension_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
-    extension_dir(runtime_dir).join("custom")
-}
-
 /// Return the directory holding profile ini presets.
 pub fn profiles_ini_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
     runtime_dir.join("etc").join("profiles")
@@ -179,6 +159,19 @@ pub fn profiles_ini_dir(runtime_dir: &camino::Utf8Path) -> Utf8PathBuf {
 /// Return the path to a named profile preset ini file.
 pub fn profile_ini_path(runtime_dir: &camino::Utf8Path, profile_name: &str) -> Utf8PathBuf {
     profiles_ini_dir(runtime_dir).join(format!("{profile_name}.ini"))
+}
+
+/// Directory under which phpvm writes a copy of the active profile preset for
+/// static runtimes (outside the runtime tree so the tarball stays minimal).
+/// `~/.phpvm/ini/`. Used to drive PHPRC for bare `php` after `phpvm use`.
+pub fn phpvm_managed_ini_dir() -> Result<Utf8PathBuf> {
+    Ok(config::data_dir()?.join("ini"))
+}
+
+/// Path to the phpvm-managed ini file for a resolved PHP version (static model).
+/// e.g. `~/.phpvm/ini/8.3.31.ini`. The parent dir is created on first materialize.
+pub fn managed_ini_for_version(version: &str) -> Result<Utf8PathBuf> {
+    phpvm_managed_ini_dir().map(|d| d.join(format!("{version}.ini")))
 }
 
 #[cfg(test)]
@@ -195,6 +188,16 @@ mod tests {
         }"#;
         let metadata: RuntimeMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(metadata.active_profile, "wordpress");
-        assert_eq!(metadata.enabled_extensions, vec!["curl", "mbstring"]);
+    }
+
+    #[test]
+    fn managed_ini_paths_are_under_data_dir_ini() {
+        // We can't easily assert the exact home without env hacking, but we can
+        // assert structure and that it is absolute + contains "ini".
+        let dir = phpvm_managed_ini_dir().unwrap();
+        assert!(dir.as_str().contains("ini"));
+        let ver = managed_ini_for_version("8.3.31").unwrap();
+        assert!(ver.as_str().ends_with("8.3.31.ini"));
+        assert!(ver.as_str().contains("ini"));
     }
 }

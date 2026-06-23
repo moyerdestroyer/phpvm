@@ -277,8 +277,21 @@ pub struct DoctorResult {
     pub php_constraint: Option<String>,
     pub profile: Option<String>,
     pub required_extensions: Vec<String>,
-    pub missing_extensions: Vec<String>,
     pub recommended_matrix: Vec<String>,
+
+    // Runtime verification (best-effort, populated when an installed runtime can be
+    // resolved for the active/profile context). Supports the static-only model
+    // (bin/php -v, composer -V, php -m contains manifest catalog).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_php_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_catalog_extensions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_required_extensions: Option<Vec<String>>,
 }
 
 /// Result of a release-check.
@@ -409,22 +422,38 @@ fn render_doctor_human(result: &DoctorResult) -> String {
         ));
     }
 
-    if !result.missing_extensions.is_empty() {
-        lines.push(line_warn(&format!(
-            "Missing from active profile: {}",
-            result.missing_extensions.join(", ")
-        )));
-        if let Some(profile_name) = &result.profile {
-            lines.push(line_info(&format!(
-                "Try: phpvm profile use {profile_name} or phpvm profile edit {profile_name}"
-            )));
-        }
-    }
-
     if !result.recommended_matrix.is_empty() {
         lines.push(line_info("Recommended Matrix:"));
         for v in &result.recommended_matrix {
             lines.push(line_list_item(v));
+        }
+    }
+
+    // Runtime verification section (when doctor was able to inspect an active runtime)
+    if let Some(rv) = &result.runtime_version {
+        lines.push(String::new());
+        lines.push(line_info("Runtime Verification:"));
+        let ok = result.runtime_ok.unwrap_or(false);
+        let badge = status_badge(ok, if ok { "OK" } else { "ISSUES" });
+        lines.push(line_list_item(&format!("{} {}", rv, badge)));
+        if let Some(vline) = &result.runtime_php_version {
+            lines.push(line_list_item_dim(vline));
+        }
+        if let Some(missing) = &result.missing_catalog_extensions {
+            if !missing.is_empty() {
+                lines.push(line_error(&format!(
+                    "Missing from binary (catalog): {}",
+                    missing.join(", ")
+                )));
+            }
+        }
+        if let Some(missing) = &result.missing_required_extensions {
+            if !missing.is_empty() {
+                lines.push(line_error(&format!(
+                    "Required by project but unavailable in binary: {}",
+                    missing.join(", ")
+                )));
+            }
         }
     }
 
@@ -774,8 +803,12 @@ mod tests {
             php_constraint: Some("^8.1".to_string()),
             profile: Some("wordpress".to_string()),
             required_extensions: vec!["mysqli".to_string()],
-            missing_extensions: vec!["imagick".to_string()],
             recommended_matrix: vec!["8.1".to_string(), "8.3".to_string()],
+            runtime_version: None,
+            runtime_ok: None,
+            runtime_php_version: None,
+            missing_catalog_extensions: None,
+            missing_required_extensions: None,
         }
     }
 

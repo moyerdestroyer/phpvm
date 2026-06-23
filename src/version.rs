@@ -435,20 +435,6 @@ pub fn composer_home_for(resolved: &str) -> Result<camino::Utf8PathBuf> {
     Ok(homes_dir.join(format!("{}.{}", v.major, v.minor)))
 }
 
-/// Show the currently active PHP version.
-///
-/// Priority: persisted `phpvm use` value > live `PHPVM_VERSION` env > "none".
-pub fn show_current() -> Result<()> {
-    let installed = runner::installed_versions()?;
-    if let Some(v) = resolve_active_version(&installed) {
-        println!("{}", v);
-        return Ok(());
-    }
-
-    println!("none");
-    Ok(())
-}
-
 /// Print shell integration for `phpvm env`.
 ///
 /// Output is designed to be eval'ed, typically once from your shell rc:
@@ -635,7 +621,7 @@ pub fn list_remote() -> Result<()> {
 
 /// Show runtime metadata for a version specifier (resolved via installed or manifest).
 ///
-/// Output includes PHP version, bundled Composer, profile, and extension list.
+/// Output includes PHP version, bundled Composer, profile, and compiled extension catalog.
 pub fn show_info(spec: &str) -> Result<()> {
     // Prefer resolving against locally installed runtimes (works offline).
     let installed = runner::installed_versions().unwrap_or_default();
@@ -658,10 +644,23 @@ pub fn show_info(spec: &str) -> Result<()> {
         if let Some(source) = &metadata.preset_source {
             output::label("Preset:", source);
         }
-        if !metadata.enabled_extensions.is_empty() {
+        let extensions: Vec<&str> = if metadata.available_extensions.is_empty() {
+            metadata
+                .extension_catalog
+                .iter()
+                .map(|ext| ext.name.as_str())
+                .collect()
+        } else {
+            metadata
+                .available_extensions
+                .iter()
+                .map(String::as_str)
+                .collect()
+        };
+        if !extensions.is_empty() {
             output::blank();
-            output::info("Extensions:");
-            for ext in &metadata.enabled_extensions {
+            output::info("Compiled extensions:");
+            for ext in extensions {
                 output::list_item_dim(ext);
             }
         }
@@ -687,15 +686,12 @@ pub fn show_info(spec: &str) -> Result<()> {
         output::label("Composer:", &e.composer);
         output::label("Profile:", default_profile);
 
-        if let Ok(enabled) =
-            profile::enabled_extensions_for_preset(default_profile, &project_dir, None)
-        {
-            if !enabled.is_empty() {
-                output::blank();
-                output::info("Extensions:");
-                for ext in &enabled {
-                    output::list_item_dim(ext);
-                }
+        let extensions = e.extension_catalog();
+        if !extensions.is_empty() {
+            output::blank();
+            output::info("Compiled extensions:");
+            for ext in extensions {
+                output::list_item_dim(&ext);
             }
         }
     } else {
@@ -766,6 +762,7 @@ fn compute_current_version(installed: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::env_lock::LOCK as ENV_LOCK;
 
     // -----------------------------------------------------------------------
     // parse
@@ -1161,6 +1158,7 @@ mod tests {
 
     #[test]
     fn compute_current_version_falls_back_to_phpvm_version_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let installed = vers(&["8.3.12", "8.2.27"]);
         let saved_env = std::env::var("PHPVM_VERSION").ok();
         std::env::remove_var("PHPVM_VERSION");
@@ -1177,6 +1175,7 @@ mod tests {
 
     #[test]
     fn compute_current_version_prefers_persisted_config_over_stale_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let installed = vers(&["8.3.31", "8.2.31"]);
         let saved_env = std::env::var("PHPVM_VERSION").ok();
         let dir = tempfile::TempDir::new().unwrap();
@@ -1200,6 +1199,7 @@ mod tests {
 
     #[test]
     fn compute_current_version_ignores_uninstalled_env_version() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let installed = vers(&["8.3.12"]);
         let saved_env = std::env::var("PHPVM_VERSION").ok();
         let saved_home = std::env::var_os("PHPVM_HOME");

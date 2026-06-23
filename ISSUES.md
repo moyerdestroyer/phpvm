@@ -38,7 +38,7 @@ Remote manifest: `schema: "3.0"`, `catalog-2026-06-15`, published 2026-06-15.
 
 Loadable bundled extensions now include **simplexml**, **session**, **iconv**, **opcache**,
 **xdebug**, **sqlite3**, **pdo_sqlite**, **soap**, and **sockets** (26 `.so` modules per
-version). Enable via profile presets or `phpvm ext enable <name>`.
+version). Enable via profile presets (`phpvm profile use` / `profile edit`).
 
 **Migration:** existing static installs do not auto-upgrade. Reinstall each version to
 pick up the v3 bundles:
@@ -76,4 +76,4 @@ Per-minor Composer home isolation (`~/.phpvm/composer-homes/8.4`, etc.) is inten
 - Multi-version management and `phpvm matrix`
 - Project pins (`.phpvm-version`, `.phpvm.toml`, `.phpvm/profiles/`)
 - Shell integration (`eval "$(phpvm env)"`, `use_on_cd`)
-- `etc/conf.d/` for dynamic runtimes (profiles, `phpvm ext`, custom snippets)
+- `etc/conf.d/` for dynamic runtimes (profile presets)
