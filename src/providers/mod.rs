@@ -19,7 +19,6 @@ pub trait Provider {
         profile_name: &str,
         project_dir: &Utf8Path,
         manifest: Option<&Manifest>,
-        catalog: &[String],
     ) -> Result<()>;
 }
 
@@ -29,10 +28,9 @@ pub fn apply_preset(
     profile_name: &str,
     project_dir: &Utf8Path,
     manifest: Option<&Manifest>,
-    catalog: &[String],
     entry: &ManifestEntry,
 ) -> Result<()> {
-    static_php::apply_preset(target, profile_name, project_dir, manifest, catalog, entry)
+    static_php::apply_preset(target, profile_name, project_dir, manifest, entry)
 }
 
 /// Return the default provider (static_php for V1).

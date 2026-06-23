@@ -7,7 +7,6 @@ use serde::Serialize;
 
 use crate::config;
 use crate::manifest::Manifest;
-use crate::output;
 use crate::profile::ProfileTemplate;
 use crate::runtime_metadata;
 
@@ -99,18 +98,14 @@ fn bundled_starter_content(name: &str) -> Option<&'static str> {
 }
 
 /// Return bundled starter content or generate from manifest template.
-pub fn starter_content(
-    name: &str,
-    manifest: Option<&Manifest>,
-    _catalog: &[String],
-) -> Result<String> {
+pub fn starter_content(name: &str, manifest: Option<&Manifest>) -> Result<String> {
     if let Some(content) = bundled_starter_content(name) {
         return Ok(content.to_string());
     }
 
     if let Some(mf) = manifest {
         if let Some(template) = mf.resolve_profile_template(name) {
-            return Ok(render_template_ini(&template, &[]));
+            return Ok(render_template_ini(&template));
         }
     }
 
@@ -123,7 +118,7 @@ pub fn starter_content(
     )
 }
 
-fn render_template_ini(template: &ProfileTemplate, _catalog: &[String]) -> String {
+fn render_template_ini(template: &ProfileTemplate) -> String {
     // For the static-only model, profile .ini files are user-level tuning presets
     // (memory, opcache, error reporting, etc.). The extension catalog lives in the
     // manifest and is compiled into the binary; we do not emit extension= load lines
@@ -133,7 +128,7 @@ fn render_template_ini(template: &ProfileTemplate, _catalog: &[String]) -> Strin
         "; Generated from manifest template (static runtimes have compiled-in extensions)."
             .to_string(),
         String::new(),
-        "; Add memory_limit, opcache, xdebug (if separately installed), etc. here.".to_string(),
+        "; Add memory_limit, opcache, error_reporting, etc. here.".to_string(),
         String::new(),
     ]
     .join("\n")
@@ -196,7 +191,6 @@ pub fn resolve_preset(
     project_dir: &Utf8Path,
     runtime_dir: &Utf8Path,
     manifest: Option<&Manifest>,
-    catalog: &[String],
 ) -> Result<ResolvedPreset> {
     validate_profile_name(name)?;
 
@@ -205,7 +199,7 @@ pub fn resolve_preset(
     }
 
     let global_path = preset_file_path(&global_profiles_dir()?, name);
-    let content = starter_content(name, manifest, catalog)?;
+    let content = starter_content(name, manifest)?;
     materialize_starter_if_missing(&global_path, &content)?;
     Ok(ResolvedPreset {
         name: name.to_string(),
@@ -214,7 +208,11 @@ pub fn resolve_preset(
     })
 }
 
-pub(crate) fn filter_non_extension_ini_lines(ini_contents: &str) -> String {
+/// Strip load directives before writing a preset to PHPVM's managed INI file.
+///
+/// Static runtimes compile their catalog into the binary, so profiles must not
+/// attempt to load host or user-provided extension libraries.
+pub(crate) fn strip_extension_load_directives(ini_contents: &str) -> String {
     let mut lines: Vec<&str> = ini_contents
         .lines()
         .filter(|line| {
@@ -226,97 +224,6 @@ pub(crate) fn filter_non_extension_ini_lines(ini_contents: &str) -> String {
         lines.push("");
     }
     lines.join("\n")
-}
-
-/// Parse enabled extension names from ini contents.
-pub fn parse_enabled_extensions(ini_contents: &str) -> Vec<String> {
-    let mut extensions = Vec::new();
-    for line in ini_contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("extension=") {
-            let ext = normalize_extension_token(rest);
-            if !ext.is_empty() && !extensions.iter().any(|e| e == &ext) {
-                extensions.push(ext);
-            }
-        } else if let Some(rest) = trimmed.strip_prefix("zend_extension=") {
-            let ext = normalize_extension_token(rest);
-            if !ext.is_empty() && !extensions.iter().any(|e| e == &ext) {
-                extensions.push(ext);
-            }
-        }
-    }
-    extensions
-}
-
-fn normalize_extension_token(value: &str) -> String {
-    let token = value
-        .split_whitespace()
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'');
-    let file_name = token
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(token)
-        .strip_suffix(".so")
-        .or_else(|| {
-            token
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(token)
-                .strip_suffix(".dll")
-        })
-        .or_else(|| {
-            token
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(token)
-                .strip_suffix(".dylib")
-        })
-        .unwrap_or_else(|| token.rsplit(['/', '\\']).next().unwrap_or(token));
-    file_name.to_string()
-}
-
-/// Parse enabled extensions from a preset file on disk.
-pub fn parse_enabled_extensions_from_file(path: &Utf8Path) -> Result<Vec<String>> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("Failed to read preset {}", path))?;
-    Ok(parse_enabled_extensions(&contents))
-}
-
-/// Warn when a preset enables extensions not compiled into the runtime catalog.
-pub fn validate_preset_extensions(preset_path: &Utf8Path, catalog: &[String]) -> Result<()> {
-    if catalog.is_empty() {
-        return Ok(());
-    }
-
-    let enabled = parse_enabled_extensions_from_file(preset_path)?;
-    let catalog_set: BTreeSet<&str> = catalog.iter().map(String::as_str).collect();
-    let missing: Vec<&str> = enabled
-        .iter()
-        .filter_map(|ext| {
-            let base = ext.strip_suffix(".so").unwrap_or(ext.as_str());
-            if catalog_set.contains(base) || catalog_set.contains(ext.as_str()) {
-                None
-            } else {
-                Some(base)
-            }
-        })
-        .collect();
-
-    if !missing.is_empty() {
-        output::warn(&format!(
-            "Preset {} enables extensions not in this runtime: {}",
-            preset_path,
-            missing.join(", ")
-        ));
-    }
-    Ok(())
 }
 
 /// Collect all known preset names from project, global, runtime, and builtins.
@@ -412,29 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn filter_non_extension_ini_lines_strips_load_directives() {
+    fn strip_extension_load_directives_removes_load_directives() {
         let ini = "; preset\nextension=curl\nmemory_limit = 256M\nzend_extension=opcache\n";
-        let filtered = filter_non_extension_ini_lines(ini);
+        let filtered = strip_extension_load_directives(ini);
         assert!(filtered.contains("; preset"));
         assert!(filtered.contains("memory_limit = 256M"));
         assert!(!filtered.contains("extension=curl"));
         assert!(!filtered.contains("zend_extension=opcache"));
-    }
-
-    #[test]
-    fn parse_enabled_extensions_reads_extension_lines() {
-        let ini = r#"
-; comment
-extension=curl
-extension=mbstring
-;extension=gd
-zend_extension=xdebug
-"#;
-        let exts = parse_enabled_extensions(ini);
-        assert!(exts.contains(&"curl".to_string()));
-        assert!(exts.contains(&"mbstring".to_string()));
-        assert!(!exts.contains(&"gd".to_string()));
-        assert!(exts.contains(&"xdebug".to_string()));
     }
 
     #[test]
@@ -466,7 +357,7 @@ zend_extension=xdebug
         let runtime = TempDir::new()?;
         let runtime_dir = utf8(&runtime);
 
-        let resolved = resolve_preset("custom", &project_dir, &runtime_dir, None, &[])?;
+        let resolved = resolve_preset("custom", &project_dir, &runtime_dir, None)?;
         assert_eq!(resolved.source, PresetSource::Project);
         assert_eq!(resolved.path, project_ini);
         Ok(())

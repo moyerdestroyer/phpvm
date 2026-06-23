@@ -7,7 +7,6 @@ use crate::config;
 use crate::output::{
     self, DoctorResult, MatrixEntry, MatrixResult, OutputFormat, ReleaseCheckResult, RunStatus,
 };
-use crate::profile;
 use crate::runner;
 
 // ---------------------------------------------------------------------------
@@ -99,15 +98,7 @@ pub fn read_required_extensions(project_dir: &Utf8Path) -> Vec<String> {
     extensions
 }
 
-fn missing_extensions_for_preset(required: &[String], enabled: &[String]) -> Vec<String> {
-    required
-        .iter()
-        .filter(|ext| !enabled.iter().any(|e| e == *ext))
-        .cloned()
-        .collect()
-}
-
-/// Recommend an extension profile based on the detected project type.
+/// Recommend an INI tuning profile based on the detected project type.
 ///
 /// - WordPress Plugin → `"wordpress"`
 /// - Laravel Application → `"laravel"`
@@ -141,7 +132,7 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         Err(e) => {
             if matches!(format, OutputFormat::Human) {
                 output::warn(&format!(
-                    "Could not fetch manifest: {e}. Extension recommendations may be incomplete."
+                    "Could not fetch manifest: {e}. Runtime extension verification may be incomplete."
                 ));
             }
             None
@@ -157,51 +148,30 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
         .clone()
         .or_else(|| project_type.as_ref().map(|pt| recommend_profile(pt)));
 
-    let enabled_extensions = profile_name
-        .as_deref()
-        .and_then(|name| {
-            profile::enabled_extensions_for_preset(name, &project_dir, mf.as_ref()).ok()
-        })
-        .unwrap_or_default();
-
-    let missing_extensions = if profile_name.is_some() {
-        missing_extensions_for_preset(&required_extensions, &enabled_extensions)
-    } else {
-        Vec::new()
-    };
-
     let recommended_matrix = config::resolve_matrix(&config);
 
     if matches!(format, OutputFormat::Human) {
         warn_if_matrix_may_conflict_with_constraint(&recommended_matrix, php_constraint.as_deref());
     }
 
-    if !enabled_extensions.is_empty() && matches!(format, OutputFormat::Human) {
-        output::info(&format!(
-            "Enabled extensions: {}",
-            enabled_extensions.join(", ")
-        ));
-    }
-
-    // Best-effort runtime verification for the static model (and legacy).
+    // Best-effort runtime verification for the static model.
     // Determines a candidate version from persisted use / installed, then execs
     // its bin/php + bin/composer directly and checks php -m against the manifest
     // catalog. Never falls back to host PHP.
-    let (rt_version, rt_ok, rt_php_v, rt_missing, rt_extras) =
-        verify_runtime(mf.as_ref(), profile_name.as_deref(), &enabled_extensions);
+    let (rt_version, rt_ok, rt_php_v, rt_missing, rt_missing_required) =
+        verify_runtime(mf.as_ref(), &required_extensions);
 
     let result = DoctorResult {
         project_type,
         php_constraint,
         profile: profile_name,
         required_extensions,
-        missing_extensions,
         recommended_matrix,
         runtime_version: rt_version,
         runtime_ok: rt_ok,
         runtime_php_version: rt_php_v,
         missing_catalog_extensions: rt_missing,
-        profile_extras_not_in_binary: rt_extras,
+        missing_required_extensions: rt_missing_required,
     };
 
     output::print_doctor_result(&result, format);
@@ -214,8 +184,7 @@ pub fn run_with_format(format: OutputFormat) -> Result<()> {
 #[allow(clippy::type_complexity)]
 fn verify_runtime(
     mf: Option<&crate::manifest::Manifest>,
-    _profile: Option<&str>,
-    enabled_from_profile: &[String],
+    required_extensions: &[String],
 ) -> (
     Option<String>,
     Option<bool>,
@@ -298,26 +267,17 @@ fn verify_runtime(
 
     let missing_cat: Vec<String> = catalog
         .iter()
-        .filter(|c| {
-            !modules
-                .iter()
-                .any(|m| m == *c || m.contains(&c.to_ascii_lowercase()))
-        })
+        .filter(|extension| !modules_include_extension(&modules, extension))
         .cloned()
         .collect();
 
-    // Profile-declared things not visible in -m (xdebug etc for static debug profiles)
-    let profile_extras: Vec<String> = enabled_from_profile
+    let missing_required: Vec<String> = required_extensions
         .iter()
-        .filter(|e| {
-            let low = e.to_ascii_lowercase();
-            !modules.iter().any(|m| m == &low || m.contains(&low))
-                && !catalog.iter().any(|c| c.eq_ignore_ascii_case(e))
-        })
+        .filter(|extension| !modules_include_extension(&modules, extension))
         .cloned()
         .collect();
 
-    let overall_ok = v_ok && comp_ok && missing_cat.is_empty();
+    let overall_ok = v_ok && comp_ok && missing_cat.is_empty() && missing_required.is_empty();
 
     (
         Some(ver),
@@ -328,12 +288,19 @@ fn verify_runtime(
         } else {
             Some(missing_cat)
         },
-        if profile_extras.is_empty() {
+        if missing_required.is_empty() {
             None
         } else {
-            Some(profile_extras)
+            Some(missing_required)
         },
     )
+}
+
+fn modules_include_extension(modules: &[String], extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    modules
+        .iter()
+        .any(|module| module == &extension || module.contains(&extension))
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +644,14 @@ mod tests {
 
         let extensions = read_required_extensions(&utf8(&dir));
         assert_eq!(extensions, vec!["curl", "mbstring", "tokenizer"]);
+    }
+
+    #[test]
+    fn modules_include_required_extension_from_static_runtime_output() {
+        let modules = vec!["curl".to_string(), "zend opcache".to_string()];
+        assert!(modules_include_extension(&modules, "curl"));
+        assert!(modules_include_extension(&modules, "opcache"));
+        assert!(!modules_include_extension(&modules, "imagick"));
     }
 
     // -- recommend_profile ----------------------------------------------------

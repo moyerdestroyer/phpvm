@@ -35,7 +35,6 @@ impl Provider for StaticPhpProvider {
         profile_name: &str,
         project_dir: &camino::Utf8Path,
         manifest: Option<&Manifest>,
-        catalog: &[String],
     ) -> Result<()> {
         let mut steps = StepList::new();
         let result = install_with_steps(
@@ -44,7 +43,6 @@ impl Provider for StaticPhpProvider {
             profile_name,
             project_dir,
             manifest,
-            catalog,
             &mut steps,
         );
         steps.finish();
@@ -58,7 +56,6 @@ fn install_with_steps(
     profile_name: &str,
     project_dir: &camino::Utf8Path,
     manifest: Option<&Manifest>,
-    catalog: &[String],
     steps: &mut StepList,
 ) -> Result<()> {
     steps.start("Resolve artifact for host");
@@ -155,7 +152,7 @@ fn install_with_steps(
 
     let profile_label = format!("Apply profile '{profile_name}'");
     steps.start(&profile_label);
-    if let Err(e) = apply_preset(target, profile_name, project_dir, manifest, catalog, entry) {
+    if let Err(e) = apply_preset(target, profile_name, project_dir, manifest, entry) {
         steps.fail(&profile_label, &e.to_string());
         return Err(e).context("Failed to apply profile");
     }
@@ -444,26 +441,20 @@ fn runtime_binary_name(name: &str) -> String {
 
 // ── Profile ini presets ───────────────────────────────────────────────────
 
-/// Resolve, validate, activate, and persist metadata for a profile switch.
+/// Resolve, activate, and persist metadata for a profile switch.
 pub fn apply_preset(
     target: &Utf8PathBuf,
     profile_name: &str,
     project_dir: &camino::Utf8Path,
     manifest: Option<&Manifest>,
-    catalog: &[String],
     entry: &ManifestEntry,
 ) -> Result<()> {
-    let preset =
-        profile_preset::resolve_preset(profile_name, project_dir, target, manifest, catalog)?;
-
-    profile_preset::validate_preset_extensions(&preset.path, catalog)?;
+    let preset = profile_preset::resolve_preset(profile_name, project_dir, target, manifest)?;
 
     // Static model baseline: profiles are user-level .ini presets for tuning
     // (memory_limit, opcache, error_reporting, etc.). The binary has its
     // extension catalog compiled in; we never write etc/, conf.d/, or
     // extension load directives into the runtime tree.
-    let enabled = profile_preset::parse_enabled_extensions_from_file(&preset.path)?;
-
     // Best-effort: materialize a sanitized copy of the active preset under
     // ~/.phpvm/ini/<ver>.ini . This drives PHPRC for `phpvm use` and bare
     // `php`/`composer` invocations so that profile settings take effect.
@@ -472,24 +463,21 @@ pub fn apply_preset(
             let _ = fs::create_dir_all(p);
         }
         if let Ok(raw) = fs::read_to_string(&preset.path) {
-            let clean = profile_preset::filter_non_extension_ini_lines(&raw);
+            let clean = profile_preset::strip_extension_load_directives(&raw);
             let _ = fs::write(&managed, clean);
         }
     }
 
-    let enabled_extensions = enabled;
-
     let mut metadata = RuntimeMetadata::read(&entry.php)?
-        .unwrap_or_else(|| RuntimeMetadata::from_install(entry, profile_name, &preset, catalog));
+        .unwrap_or_else(|| RuntimeMetadata::from_install(entry, profile_name, &preset));
     metadata.update_active_preset(profile_name, &preset);
     metadata.runtime_type = entry.runtime_type.clone();
     metadata.abi = entry.abi.clone();
     metadata.thread_safety = entry.thread_safety.clone();
     metadata.extension_api = entry.extension_api.clone();
     metadata.extension_catalog = entry.extensions.clone();
-    metadata.enabled_extensions = enabled_extensions;
     if metadata.available_extensions.is_empty() {
-        metadata.available_extensions = catalog.to_vec();
+        metadata.available_extensions = entry.extension_catalog();
     }
     metadata.write(target)?;
 
@@ -502,6 +490,7 @@ pub fn apply_preset(
 mod tests {
     use super::*;
     use crate::manifest::{RuntimeExtension, RuntimeType};
+    use crate::testing::env_lock::LOCK as ENV_LOCK;
 
     // ── archive_suffix ─────────────────────────────────────────────────
 
@@ -656,6 +645,7 @@ mod tests {
 
     #[test]
     fn apply_preset_static_writes_metadata_only_no_etc_tree() -> Result<()> {
+        let _guard = ENV_LOCK.lock().unwrap();
         let target = tempfile::TempDir::new()?;
         let target_path = Utf8PathBuf::from_path_buf(target.path().to_path_buf())
             .map_err(|p| anyhow::anyhow!("{:?}", p))?;
@@ -689,16 +679,7 @@ mod tests {
             sha256: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".into(),
             artifacts: None,
         };
-        let catalog = entry.extension_catalog();
-
-        apply_preset(
-            &target_path,
-            "minimal",
-            &project_path,
-            None,
-            &catalog,
-            &entry,
-        )?;
+        apply_preset(&target_path, "minimal", &project_path, None, &entry)?;
 
         // No etc/ tree for pure static
         let etc = target_path.join("etc");

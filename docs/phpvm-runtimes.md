@@ -331,7 +331,7 @@ These match phpvm’s manifest parser today and planned v2.1 support:
 - `sha256` must be 64 hex characters (case-insensitive at verify time)
 - Exactly **one** runtime row per `php` version string
 - No conflicting URLs for the same `php` + target
-- `extensions` must reflect the built binary (doctor/profile switching depends on catalog truth)
+- `extensions` must reflect the built binary (doctor verifies the catalog against `php -m`)
 
 ---
 

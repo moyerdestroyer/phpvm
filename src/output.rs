@@ -277,7 +277,6 @@ pub struct DoctorResult {
     pub php_constraint: Option<String>,
     pub profile: Option<String>,
     pub required_extensions: Vec<String>,
-    pub missing_extensions: Vec<String>,
     pub recommended_matrix: Vec<String>,
 
     // Runtime verification (best-effort, populated when an installed runtime can be
@@ -292,7 +291,7 @@ pub struct DoctorResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_catalog_extensions: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile_extras_not_in_binary: Option<Vec<String>>,
+    pub missing_required_extensions: Option<Vec<String>>,
 }
 
 /// Result of a release-check.
@@ -423,18 +422,6 @@ fn render_doctor_human(result: &DoctorResult) -> String {
         ));
     }
 
-    if !result.missing_extensions.is_empty() {
-        lines.push(line_warn(&format!(
-            "Missing from active profile: {}",
-            result.missing_extensions.join(", ")
-        )));
-        if let Some(profile_name) = &result.profile {
-            lines.push(line_info(&format!(
-                "Try: phpvm profile use {profile_name} or phpvm profile edit {profile_name}"
-            )));
-        }
-    }
-
     if !result.recommended_matrix.is_empty() {
         lines.push(line_info("Recommended Matrix:"));
         for v in &result.recommended_matrix {
@@ -460,11 +447,11 @@ fn render_doctor_human(result: &DoctorResult) -> String {
                 )));
             }
         }
-        if let Some(extras) = &result.profile_extras_not_in_binary {
-            if !extras.is_empty() {
-                lines.push(line_warn(&format!(
-                    "Profile lists (optional / not in this static build): {}",
-                    extras.join(", ")
+        if let Some(missing) = &result.missing_required_extensions {
+            if !missing.is_empty() {
+                lines.push(line_error(&format!(
+                    "Required by project but unavailable in binary: {}",
+                    missing.join(", ")
                 )));
             }
         }
@@ -816,13 +803,12 @@ mod tests {
             php_constraint: Some("^8.1".to_string()),
             profile: Some("wordpress".to_string()),
             required_extensions: vec!["mysqli".to_string()],
-            missing_extensions: vec!["imagick".to_string()],
             recommended_matrix: vec!["8.1".to_string(), "8.3".to_string()],
             runtime_version: None,
             runtime_ok: None,
             runtime_php_version: None,
             missing_catalog_extensions: None,
-            profile_extras_not_in_binary: None,
+            missing_required_extensions: None,
         }
     }
 

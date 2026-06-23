@@ -14,7 +14,7 @@ pub enum Command {
     Install {
         /// PHP version to install (e.g. 8.3, 8.3.23, 8.3.latest)
         version: String,
-        /// Extension profile to install (wordpress, laravel, minimal, or custom)
+        /// INI tuning profile to apply (wordpress, laravel, minimal, or custom)
         #[arg(long)]
         profile: Option<String>,
     },
@@ -44,7 +44,7 @@ pub enum Command {
     Use {
         /// PHP version to activate (e.g. 8.3, 8.3.23, system). Must be installed.
         version: Option<String>,
-        /// Extension profile ini preset to activate for this runtime
+        /// INI tuning preset to activate for this runtime
         #[arg(long)]
         profile: Option<String>,
         /// Suppress informational messages (for shell hooks)
@@ -110,7 +110,7 @@ pub enum Command {
         json: bool,
     },
 
-    /// Switch extension profile presets (ini configs) on installed runtimes
+    /// Switch INI tuning presets on installed runtimes
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -122,7 +122,7 @@ pub enum Command {
     /// List PHP versions available for install (from remote manifest)
     LsRemote,
 
-    /// Show metadata for a PHP runtime (PHP, Composer, profile, extensions)
+    /// Show metadata for a PHP runtime (PHP, Composer, profile, compiled extensions)
     Info {
         /// PHP version specifier (e.g. 8.3, 8.3.23, 8.3.latest)
         version: String,

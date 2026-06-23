@@ -35,9 +35,6 @@ pub struct RuntimeMetadata {
     /// Extension names available in the runtime (legacy-friendly summary).
     #[serde(default)]
     pub available_extensions: Vec<String>,
-    /// Extensions currently enabled via the active profile ini.
-    #[serde(default, alias = "extensions")]
-    pub enabled_extensions: Vec<String>,
     #[serde(default)]
     pub installed_at: Option<String>,
 }
@@ -71,10 +68,7 @@ impl RuntimeMetadata {
         entry: &ManifestEntry,
         profile_name: &str,
         preset: &profile_preset::ResolvedPreset,
-        catalog: &[String],
     ) -> Self {
-        let enabled =
-            profile_preset::parse_enabled_extensions_from_file(&preset.path).unwrap_or_default();
         Self {
             php: entry.php.clone(),
             composer: entry.composer.clone(),
@@ -85,8 +79,7 @@ impl RuntimeMetadata {
             thread_safety: entry.thread_safety.clone(),
             extension_api: entry.extension_api.clone(),
             extension_catalog: entry.extensions.clone(),
-            available_extensions: catalog.to_vec(),
-            enabled_extensions: enabled,
+            available_extensions: entry.extension_catalog(),
             installed_at: Some(iso8601_now()),
         }
     }
@@ -98,9 +91,6 @@ impl RuntimeMetadata {
     ) {
         self.active_profile = profile_name.to_string();
         self.preset_source = Some(format_preset_source(preset));
-        if let Ok(enabled) = profile_preset::parse_enabled_extensions_from_file(&preset.path) {
-            self.enabled_extensions = enabled;
-        }
     }
 }
 
@@ -198,7 +188,6 @@ mod tests {
         }"#;
         let metadata: RuntimeMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(metadata.active_profile, "wordpress");
-        assert_eq!(metadata.enabled_extensions, vec!["curl", "mbstring"]);
     }
 
     #[test]

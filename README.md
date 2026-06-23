@@ -4,7 +4,7 @@
 
 # phpvm
 
-**PHP, without the drama.** 
+**PHP, without the drama.**
 
 A lightweight tool for developers who need to hop between real PHP versions, run tests across them, and not think about it until they have to. Prebuilt static binaries, zero host PHP or Composer, and profiles that are just .ini files for the settings you actually care about.
 
@@ -42,7 +42,7 @@ phpvm release-check
 
 ## Profiles = your settings, your way
 
-Profiles are plain `.ini` files. They handle memory limits, opcache, error reporting, and whatever else you tweak. The extensions are already compiled into the binary — no more extension= gymnastics.
+Profiles are plain `.ini` files. They handle memory limits, opcache, error reporting, and whatever else you tweak. They never install, enable, or disable extensions: each runtime ships with its extension catalog compiled in.
 
 ```bash
 phpvm install 8.3 --profile=laravel
@@ -52,6 +52,8 @@ phpvm profile list
 ```
 
 Drop team presets in `.phpvm/profiles/` in your repo. They get picked up automatically. phpvm never clobbers files you already have.
+
+`extension=` and `zend_extension=` lines are not applied from profiles. Use `phpvm info <version>` to inspect the compiled catalog. `phpvm doctor` checks `composer.json` `ext-*` requirements against the installed runtime's actual `php -m` output.
 
 Set a project default in `.phpvm.toml`:
 
