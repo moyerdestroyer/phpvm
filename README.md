@@ -4,107 +4,95 @@
 
 # phpvm
 
-**PHP, without the drama.**
+phpvm installs prebuilt PHP + Composer runtimes and lets you run a project against a
+specific PHP version without relying on host PHP.
 
-A lightweight tool for developers who need to hop between real PHP versions, run tests across them, and not think about it until they have to. Prebuilt static binaries, zero host PHP or Composer, and profiles that are just .ini files for the settings you actually care about.
+It is meant for compatibility work: install a runtime, run Composer or tests with it,
+check a project, and test across the versions you support.
 
-Install in one curl. Switch versions instantly. Test your stuff. Get back to writing code.
-
-## 30 seconds to up and running
+## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moyerdestroyer/phpvm/master/install.sh | bash
 ```
 
-Then:
+The installer downloads the latest phpvm release, verifies it, installs the CLI to
+`~/.local/bin/phpvm` by default, and can add shell integration when prompted. It does not
+require root, PHP, Composer, or Rust.
+
+## Use
 
 ```bash
-phpvm install 8.3
-phpvm run 8.3 php -v
-phpvm run 8.3 composer install
+phpvm ls-remote
+phpvm install 8.4
+phpvm run 8.4 php -v
+phpvm run 8.4 composer install
 ```
 
-That's it. The runtime lives in `~/.phpvm/`, the CLI is in `~/.local/bin/phpvm` (or wherever you pointed the installer).
-
-Want more versions?
+For an interactive shell:
 
 ```bash
-phpvm install 8.1 8.2 8.4
-phpvm matrix composer test
+phpvm use 8.4
+php -v
+composer -V
 ```
 
-Checking a release is about to ship?
+For project checks:
 
 ```bash
 phpvm doctor
+phpvm matrix composer test
 phpvm release-check
 ```
 
-## Profiles = your settings, your way
-
-Profiles are plain `.ini` files. They handle memory limits, opcache, error reporting, and whatever else you tweak. They never install, enable, or disable extensions: each runtime ships with its extension catalog compiled in.
-
-```bash
-phpvm install 8.3 --profile=laravel
-phpvm profile use wordpress
-phpvm profile edit my-team-rules
-phpvm profile list
-```
-
-Drop team presets in `.phpvm/profiles/` in your repo. They get picked up automatically. phpvm never clobbers files you already have.
-
-`extension=` and `zend_extension=` lines are not applied from profiles. Use `phpvm info <version>` to inspect the compiled catalog. `phpvm doctor` checks `composer.json` `ext-*` requirements against the installed runtime's actual `php -m` output.
-
-Set a project default in `.phpvm.toml`:
+Project defaults can live in `.phpvm.toml`:
 
 ```toml
-profile = "wordpress"
+version = "8.4"
+profile = "laravel"
+matrix = ["8.2", "8.3", "8.4", "8.5"]
 ```
 
-## The shell integration (this is the good part)
+## Profiles
 
-Run the installer and say yes to shell integration, or add this to your `.zshrc`/`.bashrc`:
+Profiles are plain `php.ini` presets for settings such as memory limits, upload limits,
+opcache, and error reporting.
 
 ```bash
-eval "$(phpvm env)"
+phpvm install 8.4 --profile=laravel
+phpvm profile list
+phpvm profile use minimal
 ```
 
-Now you can do:
+Profiles do not install extensions for static runtimes. Extensions are compiled into the
+downloaded runtime and can be inspected with:
 
 ```bash
-phpvm use 8.3 --profile=laravel
-# boom — bare `php` and `composer` just work in this shell (and future shells)
+phpvm info 8.4
 ```
 
-`phpvm use system` drops you back to whatever your OS ships. `phpvm deactivate` if you want to undo for the current shell only.
+## Scope
 
-Prefer explicit? `phpvm run 8.3 ...` always works and is great for scripts/CI.
+phpvm is for running PHP and Composer under known runtimes, testing version compatibility,
+and checking Composer PHP / `ext-*` requirements.
+
+phpvm is not a production service manager, web server manager, Docker replacement, or
+local PHP compiler. It does not try to make dependency resolution identical across PHP
+versions.
 
 ## Uninstall
 
 ```bash
 rm ~/.local/bin/phpvm
-# full nuke (optional)
 rm -rf ~/.phpvm
 ```
 
-## We actually want your feedback
+Remove the phpvm shell integration block from your shell config if the installer added
+one.
 
-This thing exists because developers get tired of "but it works with 8.2 on my machine." We're optimizing for the workflows that matter: quick installs, easy matrix testing, `doctor` and `release-check` when you're about to ship, and not having to care about PHP until you do.
+## Feedback
 
-If you're kicking the tires:
+phpvm is still being shaped around real project workflows. If you try it, open an issue
+with the project type, PHP versions, command you ran, and what felt confusing or missing:
 
-- Does it feel fast and obvious?
-- Is there a workflow you wish it just handled?
-- Got a weird edge case or a feature that would make your life better?
-
-Open an issue. Comment on a release. Tell us what sucks or what rules. User testing and real suggestions are how this gets better — we're not trying to build the perfect compatibility matrix in a vacuum.
-
-Star the repo, try it on a side project, and let us know how it goes.
-
-## Learn more
-
-- [AGENTS.md](AGENTS.md) — how the thing is built and how to contribute
-- [GitHub](https://github.com/moyerdestroyer/phpvm) — issues, releases, the usual
-
-Happy hacking.
+https://github.com/moyerdestroyer/phpvm/issues
